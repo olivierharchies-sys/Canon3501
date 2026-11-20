@@ -10,6 +10,9 @@ import android.print.PrintAttributes
 import android.print.PrintDocumentAdapter
 import android.print.PrintDocumentInfo
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
@@ -70,7 +73,7 @@ private val trustAll = arrayOf<javax.net.ssl.TrustManager>(object : javax.net.ss
     override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = arrayOf()
 })
 
-private fun open(url: String, method: String): HttpURLConnection {
+internal fun open(url: String, method: String, read: Int = 60000): HttpURLConnection {
     val conn = URL(url).openConnection() as HttpURLConnection
     if (conn is javax.net.ssl.HttpsURLConnection) {
         val ssl = javax.net.ssl.SSLContext.getInstance("TLS")
@@ -80,14 +83,14 @@ private fun open(url: String, method: String): HttpURLConnection {
     }
     return conn.apply {
         requestMethod = method
-        connectTimeout = 5000
-        readTimeout = 60000
+        connectTimeout = 3000
+        readTimeout = read
         instanceFollowRedirects = false
     }
 }
 
-private fun portOpen(ip: String, port: Int): Boolean = try {
-    java.net.Socket().use { it.connect(java.net.InetSocketAddress(ip, port), 2000) }
+internal fun portOpen(ip: String, port: Int, ms: Int = 2000): Boolean = try {
+    java.net.Socket().use { it.connect(java.net.InetSocketAddress(ip, port), ms) }
     true
 } catch (e: Exception) {
     false
@@ -118,7 +121,7 @@ object Escl {
     private fun findBase(ip: String): String? =
         listOf("http://$ip", "https://$ip").firstOrNull { b ->
             try {
-                val c = open("$b/eSCL/ScannerCapabilities", "GET")
+                val c = open("$b/eSCL/ScannerCapabilities", "GET", 5000)
                 val ok = c.responseCode == 200
                 c.disconnect()
                 ok
@@ -160,62 +163,71 @@ object Escl {
     }
 }
 
-/** Diagnostic de connexion : indique ce qui répond sur l'imprimante. */
+/** Diagnostic de connexion : sondes en parallèle, délais courts. */
 object Diag {
     suspend fun run(ip: String): String = withContext(Dispatchers.IO) {
-        fun port(p: Int) = try {
-            java.net.Socket().use { it.connect(java.net.InetSocketAddress(ip, p), 3000) }
-            "ouvert"
-        } catch (e: Exception) {
-            "fermé ou injoignable"
-        }
-        val sb = StringBuilder()
-        sb.appendLine("Port 80 (page web) : ${port(80)}")
-        sb.appendLine("Port 631 (IPP, encre) : ${port(631)}")
-        sb.appendLine("Port 443 (HTTPS) : ${port(443)}")
-        val home = try {
-            val c = open("http://$ip/", "GET")
-            val s = "HTTP ${c.responseCode} ${c.getHeaderField("Server") ?: ""}"
-            c.disconnect()
-            s
-        } catch (e: Exception) {
-            "aucune réponse"
-        }
-        sb.appendLine("Page d'accueil : $home")
-        for (b in listOf("http://$ip", "https://$ip")) {
-            val r = try {
-                val c = open("$b/eSCL/ScannerCapabilities", "GET")
-                val code = c.responseCode
-                c.disconnect()
-                "HTTP $code"
-            } catch (e: Exception) {
-                "aucune réponse"
+        if (ip.isBlank()) return@withContext "Adresse vide"
+        val ports = listOf(80 to "page web", 443 to "HTTPS", 631 to "IPP", 8611 to "BJNP Canon", 9100 to "RAW")
+        coroutineScope {
+            val portJobs = ports.map { (p, n) -> async { "Port $p ($n) : ${if (portOpen(ip, p, 1500)) "ouvert" else "fermé"}" } }
+            val esclJobs = listOf("http://$ip", "https://$ip").map { b ->
+                async {
+                    val r = try {
+                        val c = open("$b/eSCL/ScannerCapabilities", "GET", 4000)
+                        val code = c.responseCode
+                        c.disconnect()
+                        "HTTP $code"
+                    } catch (e: Exception) {
+                        "aucune réponse"
+                    }
+                    "eSCL ${b.substringBefore(':')} : $r"
+                }
             }
-            sb.appendLine("eSCL ${b.substringBefore(':')} : $r")
+            val ippJob = async {
+                try {
+                    val i = Ipp.query(ip)
+                    "IPP : ${i.model} (${Ipp.endpoint ?: "?"})"
+                } catch (e: Exception) {
+                    "IPP : échec (${e.message})"
+                }
+            }
+            (portJobs.awaitAll() + esclJobs.awaitAll() + ippJob.await()).joinToString("\n")
         }
-        val ipp = try { Ipp.query(ip).model } catch (e: Exception) { "échec (${e.message})" }
-        sb.append("IPP : $ipp")
-        sb.toString()
     }
 }
 
 /** Interrogation IPP pour l'état et les niveaux d'encre. */
 object Ipp {
     data class Ink(val name: String, val level: Int, val color: Int?)
-    data class Info(val model: String, val state: String, val reasons: List<String>, val inks: List<Ink>)
+    data class Info(
+        val model: String, val state: String, val message: String,
+        val reasons: List<String>, val inks: List<Ink>,
+    )
+
+    /** Dernière adresse IPP qui a répondu (ex. http://ip:631/ipp/print). */
+    @Volatile var endpoint: String? = null
+        private set
 
     private fun u16(d: ByteArray, i: Int) = ((d[i].toInt() and 0xFF) shl 8) or (d[i + 1].toInt() and 0xFF)
-    private fun i32(b: ByteArray) =
+    private fun i32(b: ByteArray) = if (b.size < 4) -1 else
         ((b[0].toInt() and 0xFF) shl 24) or ((b[1].toInt() and 0xFF) shl 16) or
             ((b[2].toInt() and 0xFF) shl 8) or (b[3].toInt() and 0xFF)
 
+    private val paths = listOf("/ipp/print", "/ipp/printer", "/ipp/port1", "/ipp", "/")
+
     suspend fun query(ip: String): Info = withContext(Dispatchers.IO) {
+        endpoint?.takeIf { it.contains("//$ip:") }?.let { e ->
+            runCatching { return@withContext parse(post(e, ip, attrsRequest(e, ip))) }
+        }
         var last: Exception = IOException("aucun port IPP ouvert (631, 80, 443)")
         for (port in listOf(631, 80, 443)) {
             if (!portOpen(ip, port)) continue
-            for (path in listOf("/ipp/print", "/ipp/port1", "/ipp")) {
+            for (path in paths) {
+                val url = "${if (port == 443) "https" else "http"}://$ip:$port$path"
                 try {
-                    return@withContext queryPath(ip, port, path)
+                    val info = parse(post(url, ip, attrsRequest(url, ip)))
+                    endpoint = url
+                    return@withContext info
                 } catch (e: Exception) {
                     last = IOException("port $port $path : ${e.message}")
                 }
@@ -224,50 +236,67 @@ object Ipp {
         throw last
     }
 
-    private suspend fun queryPath(ip: String, port: Int, path: String): Info = withContext(Dispatchers.IO) {
-        val out = ByteArrayOutputStream()
-        fun w16(v: Int) { out.write(v shr 8); out.write(v and 0xFF) }
-        fun attr(tag: Int, name: String, value: String) {
-            out.write(tag)
-            w16(name.length); out.write(name.toByteArray())
-            val b = value.toByteArray(); w16(b.size); out.write(b)
-        }
-        out.write(2); out.write(0)          // IPP 2.0
-        w16(0x000B)                         // Get-Printer-Attributes
-        out.write(byteArrayOf(0, 0, 0, 1))  // request-id
-        out.write(0x01)                     // operation-attributes-tag
+    private fun printerUri(url: String) = "ipp://" + url.substringAfter("://")
+
+    private fun attrsRequest(url: String, ip: String): ByteArray = IppWriter(0x000B).apply {
         attr(0x47, "attributes-charset", "utf-8")
         attr(0x48, "attributes-natural-language", "en")
-        attr(0x45, "printer-uri", "ipp://$ip$path")
+        attr(0x45, "printer-uri", printerUri(url))
         listOf(
-            "printer-make-and-model", "printer-state", "printer-state-reasons",
+            "printer-make-and-model", "printer-state", "printer-state-reasons", "printer-state-message",
             "marker-names", "marker-levels", "marker-colors",
         ).forEachIndexed { i, n -> attr(0x44, if (i == 0) "requested-attributes" else "", n) }
-        out.write(0x03)
+    }.end()
 
-        val conn = open("${if (port == 443) "https" else "http"}://$ip:$port$path", "POST").apply {
+    private fun post(url: String, ip: String, body: ByteArray): ByteArray {
+        val conn = open(url, "POST", 8000).apply {
             doOutput = true
-            readTimeout = 8000
             setRequestProperty("Content-Type", "application/ipp")
         }
-        conn.outputStream.use { it.write(out.toByteArray()) }
-        if (conn.responseCode != 200) throw IOException("HTTP ${conn.responseCode}")
-        val d = conn.inputStream.use { it.readBytes() }
-        conn.disconnect()
-        if (d.size < 8 || u16(d, 2) >= 0x0100) throw IOException("Réponse IPP refusée")
+        try {
+            conn.outputStream.use { it.write(body) }
+            if (conn.responseCode != 200) throw IOException("HTTP ${conn.responseCode}")
+            val d = conn.inputStream.use { it.readBytes() }
+            if (d.size < 8) throw IOException("réponse IPP vide")
+            if (u16(d, 2) >= 0x0100) throw IOException("statut IPP 0x%04X".format(u16(d, 2)))
+            return d
+        } finally {
+            conn.disconnect()
+        }
+    }
 
+    /** Envoie des données brutes (commandes Canon) via une tâche IPP Print-Job. */
+    suspend fun printRaw(ip: String, data: ByteArray) = withContext(Dispatchers.IO) {
+        if (endpoint?.contains("//$ip:") != true) query(ip)
+        val url = endpoint ?: throw IOException("IPP indisponible")
+        val req = IppWriter(0x0002).apply {
+            attr(0x47, "attributes-charset", "utf-8")
+            attr(0x48, "attributes-natural-language", "en")
+            attr(0x45, "printer-uri", printerUri(url))
+            attr(0x42, "requesting-user-name", "canonhub")
+            attr(0x42, "job-name", "Maintenance")
+            attr(0x49, "document-format", "application/octet-stream")
+        }.end()
+        post(url, ip, req + data)
+        Unit
+    }
+
+    private fun parse(d: ByteArray): Info {
         val map = LinkedHashMap<String, MutableList<ByteArray>>()
         var p = 8
         var last = ""
-        while (p + 3 <= d.size) {
+        while (p < d.size) {
             val tag = d[p].toInt() and 0xFF
             p++
             if (tag == 0x03) break
             if (tag <= 0x0F) continue
+            if (p + 2 > d.size) break
             val nl = u16(d, p); p += 2
+            if (p + nl + 2 > d.size) break
             val name = if (nl > 0) String(d, p, nl) else last
             p += nl
             val vl = u16(d, p); p += 2
+            if (p + vl > d.size) break
             val v = d.copyOfRange(p, p + vl); p += vl
             if (nl > 0) last = name
             map.getOrPut(name) { mutableListOf() }.add(v)
@@ -281,7 +310,9 @@ object Ipp {
             Ink(
                 n,
                 levels.getOrElse(i) { -1 },
-                colors.getOrNull(i)?.let { runCatching { android.graphics.Color.parseColor(it) }.getOrNull() },
+                colors.getOrNull(i)?.split('#')?.lastOrNull { it.length == 6 }?.let { h ->
+                    runCatching { android.graphics.Color.parseColor("#$h") }.getOrNull()
+                },
             )
         }
         val state = when (map["printer-state"]?.firstOrNull()?.let { i32(it) }) {
@@ -290,9 +321,10 @@ object Ipp {
             5 -> "Arrêtée"
             else -> "Inconnu"
         }
-        Info(
+        return Info(
             model = strings("printer-make-and-model").firstOrNull() ?: "Imprimante",
             state = state,
+            message = strings("printer-state-message").firstOrNull().orEmpty(),
             reasons = strings("printer-state-reasons").filter { it != "none" },
             inks = inks,
         )

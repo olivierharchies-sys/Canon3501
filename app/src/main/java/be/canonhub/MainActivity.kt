@@ -45,6 +45,7 @@ import androidx.compose.material.icons.filled.DocumentScanner
 import androidx.compose.material.icons.filled.Print
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.WaterDrop
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -59,6 +60,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
@@ -142,7 +144,7 @@ fun HomeScreen(m: Modifier, ip: String, go: (Screen) -> Unit) {
         Tile("Numériser", "Vitre vers image", Icons.Filled.DocumentScanner, Color(0xFF43A047), Screen.Scan),
         Tile("Copier", "Scan puis impression", Icons.Filled.ContentCopy, Color(0xFFF4511E), Screen.Copy),
         Tile("Encre et état", "Niveaux, alertes", Icons.Filled.WaterDrop, Color(0xFF8E24AA), Screen.Ink),
-        Tile("Entretien", "Test, nettoyage, aide", Icons.Filled.Build, Color(0xFF00897B), Screen.Maintenance),
+        Tile("Entretien", "Nettoyage, buses, alignement", Icons.Filled.Build, Color(0xFF00897B), Screen.Maintenance),
         Tile("Réglages", "Adresse IP", Icons.Filled.Settings, Color(0xFF546E7A), Screen.Settings),
     )
     LazyVerticalGrid(
@@ -243,15 +245,35 @@ fun ScanOptions(dpi: Int, onDpi: (Int) -> Unit, color: Boolean, onColor: (Boolea
     }
 }
 
-fun saveJpeg(ctx: Context, data: ByteArray) {
+fun saveJpeg(ctx: Context, data: ByteArray): Uri? {
     val cv = ContentValues().apply {
         put(MediaStore.Images.Media.DISPLAY_NAME, "scan_${System.currentTimeMillis()}.jpg")
         put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
         put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/Canon")
     }
-    val uri = ctx.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv) ?: return
+    val uri = ctx.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv) ?: return null
     ctx.contentResolver.openOutputStream(uri)?.use { it.write(data) }
+    return uri
 }
+
+/** Enregistre le scan en PDF A4 dans Téléchargements/Canon. */
+fun savePdf(ctx: Context, bmp: Bitmap): Uri? = runCatching {
+    val doc = android.graphics.pdf.PdfDocument()
+    val page = doc.startPage(android.graphics.pdf.PdfDocument.PageInfo.Builder(595, 842, 1).create())
+    val sc = minOf(595f / bmp.width, 842f / bmp.height)
+    val dst = android.graphics.RectF(0f, 0f, bmp.width * sc, bmp.height * sc)
+    page.canvas.drawBitmap(bmp, null, dst, Paint(Paint.FILTER_BITMAP_FLAG))
+    doc.finishPage(page)
+    val cv = ContentValues().apply {
+        put(MediaStore.Downloads.DISPLAY_NAME, "scan_${System.currentTimeMillis()}.pdf")
+        put(MediaStore.Downloads.MIME_TYPE, "application/pdf")
+        put(MediaStore.Downloads.RELATIVE_PATH, "Download/Canon")
+    }
+    val uri = ctx.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, cv)
+    uri?.let { u -> ctx.contentResolver.openOutputStream(u)?.use { doc.writeTo(it) } }
+    doc.close()
+    uri
+}.getOrNull()
 
 @Composable
 fun ScanScreen(m: Modifier, ip: String) {
@@ -288,9 +310,21 @@ fun ScanScreen(m: Modifier, ip: String) {
         bmp?.let { b ->
             Image(b.asImageBitmap(), "Aperçu", Modifier.fillMaxWidth())
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = { bytes?.let { saveJpeg(ctx, it); msg = "Enregistré dans Images/Canon" } }) { Text("Enregistrer") }
+                Button(onClick = { bytes?.let { saveJpeg(ctx, it); msg = "Enregistré dans Images/Canon" } }) { Text("JPEG") }
+                Button(onClick = { msg = if (savePdf(ctx, b) != null) "PDF enregistré dans Téléchargements/Canon" else "Échec PDF" }) { Text("PDF") }
                 OutlinedButton(onClick = { printBitmap(ctx, "scan", b) }) { Text("Imprimer") }
             }
+            OutlinedButton(onClick = {
+                bytes?.let { saveJpeg(ctx, it) }?.let { u ->
+                    ctx.startActivity(
+                        Intent.createChooser(
+                            Intent(Intent.ACTION_SEND).setType("image/jpeg").putExtra(Intent.EXTRA_STREAM, u)
+                                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
+                            "Partager le scan",
+                        ),
+                    )
+                }
+            }) { Text("Partager") }
         }
     }
 }
@@ -369,6 +403,7 @@ fun InkScreen(m: Modifier, ip: String) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text(i.model, style = MaterialTheme.typography.titleMedium)
                     Text("État : ${i.state}")
+                    if (i.message.isNotBlank()) Text(i.message, style = MaterialTheme.typography.bodySmall)
                     i.reasons.forEach { Text("• ${reasonLabel(it)}") }
                 }
             }
@@ -428,40 +463,96 @@ fun MCard(title: String, text: String, action: String? = null, onClick: () -> Un
 @Composable
 fun MaintenanceScreen(m: Modifier, ip: String, go: (Screen) -> Unit) {
     val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val log = remember { ToolLog(ctx) }
+    var transport by remember { mutableStateOf(log.transport) }
+    var busy by remember { mutableStateOf<Tool?>(null) }
+    var msg by remember { mutableStateOf("") }
+    var confirm by remember { mutableStateOf<Tool?>(null) }
+    var refresh by remember { mutableIntStateOf(0) }
+    val fmt = remember { java.text.SimpleDateFormat("dd/MM/yyyy HH:mm", java.util.Locale.FRANCE) }
+
+    fun runTool(t: Tool) {
+        if (ip.isBlank()) { msg = "Renseignez d'abord l'adresse IP (Réglages)."; return }
+        scope.launch {
+            busy = t; msg = "${t.label} : envoi…"
+            msg = try {
+                val via = CanonTools.run(ip, t, transport)
+                log.mark(t); refresh++
+                "${t.label} : commande acceptée ($via). Vérifiez que l'imprimante démarre."
+            } catch (e: Exception) {
+                "${t.label} : échec.\n${e.message}\nLancez-la depuis le menu de l'imprimante."
+            }
+            busy = null
+        }
+    }
+
+    confirm?.let { t ->
+        AlertDialog(
+            onDismissRequest = { confirm = null },
+            title = { Text(t.label) },
+            text = { Text(t.desc + "\n\nContinuer ?") },
+            confirmButton = { TextButton(onClick = { confirm = null; runTool(t) }) { Text("Lancer") } },
+            dismissButton = { TextButton(onClick = { confirm = null }) { Text("Annuler") } },
+        )
+    }
+
     Column(m.padding(16.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text("Outils de l'imprimante", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+        Text(
+            "Commandes Canon envoyées par le réseau (expérimental). Si rien ne se passe, changez de mode d'envoi ou utilisez le menu de l'imprimante.",
+            style = MaterialTheme.typography.bodySmall,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Transport.entries.forEach { tr ->
+                FilterChip(
+                    selected = transport == tr,
+                    onClick = { transport = tr; log.transport = tr },
+                    label = { Text(tr.label) },
+                )
+            }
+        }
+        if (busy != null) LinearProgressIndicator(Modifier.fillMaxWidth())
+        if (msg.isNotEmpty()) Text(msg)
+        Tool.entries.forEach { t ->
+            val last = remember(refresh) { log.last(t) }
+            ElevatedCard(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(t.label, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    Text(t.desc)
+                    Text(
+                        if (last == 0L) "Jamais lancé depuis l'appli" else "Dernier : ${fmt.format(java.util.Date(last))}",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Button(enabled = busy == null, onClick = { if (t.heavy) { confirm = t } else { runTool(t) } }) { Text("Lancer") }
+                }
+            }
+        }
+        Text("Autres", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
         MCard(
-            "Page de test",
-            "Imprime des barres de couleur et des traits fins : une couleur absente ou des traits interrompus indiquent des buses bouchées.",
-            "Imprimer la page de test",
+            "Page de test (téléphone)",
+            "Barres de couleur et traits fins imprimés via Android : utile si le test des buses ne part pas.",
+            "Imprimer",
         ) { printBitmap(ctx, "test", testBitmap()) }
         MCard("Niveaux d'encre", "À vérifier avant tout nettoyage.", "Voir les niveaux") { go(Screen.Ink) }
         MCard(
             "Réservoirs d'encre",
-            "La série G3000 fonctionne avec des réservoirs rechargeables. Contrôlez le niveau à l'œil sur les réservoirs et rechargez avant que l'encre passe sous le repère inférieur : un réservoir trop vide fait entrer de l'air et bouche les buses. Les pourcentages affichés dans l'appli ne sont qu'indicatifs.",
+            "Rechargez avant que l'encre passe sous le repère inférieur : un réservoir trop vide fait entrer de l'air et bouche les buses. Les pourcentages affichés sont indicatifs.",
         )
         MCard(
             "Interface web de l'imprimante",
-            "Ouvre la page intégrée de l'imprimante dans le navigateur : état, réseau et, selon le modèle, commandes de maintenance.",
+            "Page intégrée : état, réseau et, selon le modèle, commandes de maintenance.",
             "Ouvrir",
         ) {
             if (ip.isNotBlank()) ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("http://$ip/")))
         }
-        MCard("Service d'impression Android", "Active ou règle le module qui permet à Android d'imprimer sur la Canon.", "Ouvrir") {
+        MCard("Service d'impression Android", "Active ou règle le module d'impression Canon / Mopria.", "Ouvrir") {
             ctx.startActivity(Intent(Settings.ACTION_PRINT_SETTINGS))
         }
-        MCard(
-            "Nettoyage des têtes",
-            "À lancer si la page de test montre des traits manquants ou des couleurs pâles. Sur l'imprimante : menu Maintenance (ou Configuration, puis Maintenance), commande Nettoyage. Refaites ensuite une page de test.",
+        Text(
+            "Sans réponse réseau : sur l'imprimante, maintenez Stop jusqu'au nombre de clignotements voulu (1 = test des buses, 2 = nettoyage, 3 = nettoyage en profondeur) puis relâchez. Voir le manuel du modèle.",
+            style = MaterialTheme.typography.bodySmall,
         )
-        MCard(
-            "Nettoyage en profondeur",
-            "Seulement si deux nettoyages normaux n'ont rien corrigé : il consomme beaucoup d'encre.",
-        )
-        MCard(
-            "Alignement des têtes",
-            "À faire si les lignes verticales sont décalées ou le texte flou, depuis le même menu Maintenance.",
-        )
-        Text("Les intitulés exacts des menus dépendent du modèle. Ces commandes se lancent sur l'imprimante elle-même : aucun protocole standard ne permet de les déclencher depuis un téléphone.")
     }
 }
 
@@ -469,7 +560,10 @@ fun MaintenanceScreen(m: Modifier, ip: String, go: (Screen) -> Unit) {
 
 @Composable
 fun SettingsScreen(m: Modifier, ip: String, onSave: (String) -> Unit) {
+    val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
+    var searching by remember { mutableStateOf(false) }
+    var found by remember { mutableStateOf<List<Discovery.Found>>(emptyList()) }
     var text by remember { mutableStateOf(ip) }
     var msg by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
@@ -490,7 +584,7 @@ fun SettingsScreen(m: Modifier, ip: String, onSave: (String) -> Unit) {
                 enabled = !busy && text.isNotBlank(),
                 onClick = {
                     scope.launch {
-                        busy = true; msg = "Test en cours…"
+                        busy = true; msg = "Test en cours (≈5 s)…"
                         msg = try {
                             Diag.run(text.trim())
                         } catch (e: Exception) {
@@ -500,6 +594,29 @@ fun SettingsScreen(m: Modifier, ip: String, onSave: (String) -> Unit) {
                     }
                 },
             ) { Text("Tester") }
+        }
+        OutlinedButton(
+            enabled = !searching,
+            modifier = Modifier.fillMaxWidth(),
+            onClick = {
+                scope.launch {
+                    searching = true; msg = "Recherche sur le Wi-Fi…"
+                    found = try { Discovery.search(ctx) } catch (e: Exception) { emptyList() }
+                    msg = if (found.isEmpty()) "Aucune imprimante trouvée. Saisissez l'adresse à la main." else ""
+                    searching = false
+                }
+            },
+        ) { Text(if (searching) "Recherche…" else "Rechercher l'imprimante") }
+        found.forEach { f ->
+            Card(
+                onClick = { text = f.ip; onSave(f.ip); msg = "Enregistré : ${f.ip}" },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Column(Modifier.padding(12.dp)) {
+                    Text(f.name, fontWeight = FontWeight.Bold)
+                    Text(f.ip)
+                }
+            }
         }
         if (msg.isNotEmpty()) Text(msg)
     }

@@ -11,14 +11,14 @@ Application Kotlin / Jetpack Compose pour piloter une imprimante multifonction C
 | Tuile | Fonctionnement |
 |---|---|
 | Imprimer | PDF ou image, via la fenêtre d'impression Android (service Canon ou Mopria) |
-| Numériser | eSCL / AirScan (HTTP, port 80) depuis la vitre, A4, 150/300/600 dpi, couleur ou N&B ; enregistrement dans Images/Canon |
+| Numériser | eSCL / AirScan (HTTP, port 80) depuis la vitre, A4, 150/300/600 dpi, couleur ou N&B ; JPEG, PDF, partage |
 | Copier | numérisation puis impression |
 | Encre et état | IPP (port 631) : niveaux par cartouche, état, alertes |
-| Entretien | page de test, accès à l'interface web, aide au nettoyage et à l'alignement |
-| Réglages | adresse IP + test de connexion |
+| Entretien | test des buses, nettoyage (tout/noir/couleur), nettoyage en profondeur, alignement, rouleaux, platine — commandes Canon BJL via BJNP (8611), RAW (9100) ou IPP ; historique des lancements |
+| Réglages | adresse IP, recherche automatique (mDNS), diagnostic des ports |
 
 ## Limites connues
 - Code non compilé ni testé sur l'imprimante : prévoyez de petits ajustements au premier essai.
 - Le scan suppose que l'imprimante expose eSCL en HTTP. Si elle n'accepte que HTTPS, il faudra adapter `Escl` dans `Printer.kt`.
-- Les nettoyages, alignements et tests de buses se lancent depuis l'imprimante ou son interface web : Canon n'expose pas de commande standard pour cela.
+- Outils d'entretien expérimentaux : commandes BJL non documentées par Canon. En cas d'échec, changer le mode d'envoi ou passer par le bouton Stop de l'imprimante.
 - Scan depuis le chargeur automatique non géré (vitre uniquement).
