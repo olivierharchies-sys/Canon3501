@@ -492,9 +492,9 @@ fun SettingsScreen(m: Modifier, ip: String, onSave: (String) -> Unit) {
                     scope.launch {
                         busy = true; msg = "Test en cours…"
                         msg = try {
-                            "Connecté : ${Ipp.query(text.trim()).model}"
+                            Diag.run(text.trim())
                         } catch (e: Exception) {
-                            "Injoignable : ${e.message}"
+                            "Test impossible : ${e.message}"
                         }
                         busy = false
                     }

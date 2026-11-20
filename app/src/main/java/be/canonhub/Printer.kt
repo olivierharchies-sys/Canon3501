@@ -124,6 +124,34 @@ object Escl {
     }
 }
 
+/** Diagnostic de connexion : indique ce qui répond sur l'imprimante. */
+object Diag {
+    suspend fun run(ip: String): String = withContext(Dispatchers.IO) {
+        fun port(p: Int) = try {
+            java.net.Socket().use { it.connect(java.net.InetSocketAddress(ip, p), 3000) }
+            "ouvert"
+        } catch (e: Exception) {
+            "fermé ou injoignable"
+        }
+        val sb = StringBuilder()
+        sb.appendLine("Port 80 (page web) : ${port(80)}")
+        sb.appendLine("Port 631 (IPP, encre) : ${port(631)}")
+        sb.appendLine("Port 443 (HTTPS) : ${port(443)}")
+        val escl = try {
+            val c = open("http://$ip/eSCL/ScannerCapabilities", "GET")
+            val r = c.responseCode
+            c.disconnect()
+            "HTTP $r"
+        } catch (e: Exception) {
+            "aucune réponse"
+        }
+        sb.appendLine("Scanner eSCL : $escl")
+        val ipp = try { Ipp.query(ip).model } catch (e: Exception) { "échec (${e.message})" }
+        sb.append("IPP : $ipp")
+        sb.toString()
+    }
+}
+
 /** Interrogation IPP pour l'état et les niveaux d'encre. */
 object Ipp {
     data class Ink(val name: String, val level: Int, val color: Int?)
@@ -134,7 +162,19 @@ object Ipp {
         ((b[0].toInt() and 0xFF) shl 24) or ((b[1].toInt() and 0xFF) shl 16) or
             ((b[2].toInt() and 0xFF) shl 8) or (b[3].toInt() and 0xFF)
 
-    suspend fun query(ip: String): Info = withContext(Dispatchers.IO) {
+    suspend fun query(ip: String): Info {
+        var last: Exception = IOException("aucune réponse")
+        for (path in listOf("/ipp/print", "/ipp/port1", "/ipp")) {
+            try {
+                return queryPath(ip, path)
+            } catch (e: Exception) {
+                last = e
+            }
+        }
+        throw last
+    }
+
+    private suspend fun queryPath(ip: String, path: String): Info = withContext(Dispatchers.IO) {
         val out = ByteArrayOutputStream()
         fun w16(v: Int) { out.write(v shr 8); out.write(v and 0xFF) }
         fun attr(tag: Int, name: String, value: String) {
@@ -148,14 +188,14 @@ object Ipp {
         out.write(0x01)                     // operation-attributes-tag
         attr(0x47, "attributes-charset", "utf-8")
         attr(0x48, "attributes-natural-language", "en")
-        attr(0x45, "printer-uri", "ipp://$ip/ipp/print")
+        attr(0x45, "printer-uri", "ipp://$ip$path")
         listOf(
             "printer-make-and-model", "printer-state", "printer-state-reasons",
             "marker-names", "marker-levels", "marker-colors",
         ).forEachIndexed { i, n -> attr(0x44, if (i == 0) "requested-attributes" else "", n) }
         out.write(0x03)
 
-        val conn = open("http://$ip:631/ipp/print", "POST").apply {
+        val conn = open("http://$ip:631$path", "POST").apply {
             doOutput = true
             readTimeout = 8000
             setRequestProperty("Content-Type", "application/ipp")
