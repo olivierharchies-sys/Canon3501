@@ -392,8 +392,8 @@ fun SettingsScreen(m: Modifier, prefs: PrinterPrefs, ip: String, onSave: (String
                 enabled = !busy && text.isNotBlank(),
                 onClick = {
                     scope.launch {
-                        busy = true; msg = "Test en cours (≈5 s)…"
-                        msg = try { Diag.run(text.trim()) } catch (e: Exception) { "Test impossible : ${e.message}" }
+                        busy = true; msg = "Test en cours (≈10 s)…"
+                        msg = try { Diag.run(ctx, text.trim()) } catch (e: Exception) { "Test impossible : ${e.message}" }
                         busy = false
                     }
                 },
@@ -416,6 +416,7 @@ fun SettingsScreen(m: Modifier, prefs: PrinterPrefs, ip: String, onSave: (String
                 onClick = {
                     text = f.ip; onSave(f.ip)
                     prefs.addProfile(f.name, f.ip); profiles = prefs.profiles
+                    prefs.applyHints(f)
                     msg = "Enregistré : ${f.ip}"
                 },
                 modifier = Modifier.fillMaxWidth(),
@@ -423,6 +424,7 @@ fun SettingsScreen(m: Modifier, prefs: PrinterPrefs, ip: String, onSave: (String
                 Column(Modifier.padding(12.dp)) {
                     Text(f.name, fontWeight = FontWeight.Bold)
                     Text(f.ip)
+                    Text(f.summary(), style = MaterialTheme.typography.bodySmall)
                 }
             }
         }

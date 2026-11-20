@@ -66,6 +66,7 @@ class WatchWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx,
         val ctx = applicationContext
         val p = PrinterPrefs(ctx)
         if (p.ip.isBlank()) return Result.success()
+        p.loadHints()
         val now = System.currentTimeMillis()
         val day = 24 * 3600 * 1000L
 

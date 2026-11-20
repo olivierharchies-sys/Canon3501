@@ -95,6 +95,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val prefs = PrinterPrefs(this)
+        prefs.loadHints()
         if (savedInstanceState == null) incoming.value = intent
         runCatching { WatchWorker.schedule(this) }
         setContent {

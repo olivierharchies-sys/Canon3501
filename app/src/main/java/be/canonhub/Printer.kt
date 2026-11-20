@@ -67,6 +67,25 @@ class PrinterPrefs(ctx: Context) {
     var lastInkNotify: Long
         get() = sp.getLong("lastInkNotify", 0L)
         set(v) = sp.edit().putLong("lastInkNotify", v).apply()
+    var ippHint: String
+        get() = sp.getString("ippHint", "") ?: ""
+        set(v) = sp.edit().putString("ippHint", v).apply()
+    var esclHint: String
+        get() = sp.getString("esclHint", "") ?: ""
+        set(v) = sp.edit().putString("esclHint", v).apply()
+
+    /** Mémorise les adresses annoncées par mDNS et les transmet aux modules. */
+    fun applyHints(f: Discovery.Found) {
+        f.ippUrl()?.let { ippHint = it }
+        f.esclRoot()?.let { esclHint = it }
+        loadHints()
+    }
+
+    fun loadHints() {
+        Ipp.hint = ippHint.ifBlank { null }
+        Escl.hint = esclHint.ifBlank { null }
+    }
+
     var lastClogNotify: Long
         get() = sp.getLong("lastClogNotify", 0L)
         set(v) = sp.edit().putLong("lastClogNotify", v).apply()
@@ -168,11 +187,18 @@ object Escl {
   <pwg:DocumentFormat>image/jpeg</pwg:DocumentFormat>
 </scan:ScanSettings>"""
 
-    /** Cherche l'adresse (HTTP puis HTTPS) où le scanner répond en eSCL. */
+    /** Racine eSCL annoncée par mDNS (ex. http://ip:80/eSCL). */
+    @Volatile var hint: String? = null
+
+    fun roots(ip: String): List<String> =
+        (listOfNotNull(hint?.takeIf { it.contains("//$ip:") }) +
+            listOf("http://$ip/eSCL", "https://$ip/eSCL", "http://$ip:8080/eSCL", "http://$ip/escl")).distinct()
+
+    /** Cherche la racine où le scanner répond en eSCL. */
     private fun findBase(ip: String): String? =
-        listOf("http://$ip", "https://$ip").firstOrNull { b ->
+        roots(ip).firstOrNull { b ->
             try {
-                val c = open("$b/eSCL/ScannerCapabilities", "GET", 5000)
+                val c = open("$b/ScannerCapabilities", "GET", 5000)
                 val ok = c.responseCode == 200
                 c.disconnect()
                 ok
@@ -184,8 +210,8 @@ object Escl {
     /** Numérise une zone de la vitre et renvoie le JPEG. */
     suspend fun scan(ip: String, dpi: Int, color: Boolean, area: Area = Area.A4): ByteArray = withContext(Dispatchers.IO) {
         val root = findBase(ip)
-            ?: throw IOException("ce scanner ne répond pas en eSCL (ni HTTP ni HTTPS)")
-        val post = open("$root/eSCL/ScanJobs", "POST").apply {
+            ?: throw IOException("pas de scanner eSCL sur cette imprimante (modèle trop ancien ?). Utilisez l'appli Canon PRINT pour numériser.")
+        val post = open("$root/ScanJobs", "POST").apply {
             doOutput = true
             setRequestProperty("Content-Type", "text/xml")
         }
@@ -195,7 +221,7 @@ object Escl {
         val loc = post.getHeaderField("Location")
             ?: throw IOException("Réponse du scanner sans adresse de travail")
         post.disconnect()
-        val job = (if (loc.startsWith("http")) loc else root + loc).trimEnd('/')
+        val job = URL(URL("$root/"), loc).toString().trimEnd('/')
 
         var result: ByteArray? = null
         for (i in 0 until 60) {
@@ -216,33 +242,55 @@ object Escl {
 
 /** Diagnostic de connexion : sondes en parallèle, délais courts. */
 object Diag {
-    suspend fun run(ip: String): String = withContext(Dispatchers.IO) {
+    /** Sonde UDP BJNP (8611 imprimante, 8612 scanner). */
+    private fun bjnpUdp(ip: String, port: Int, dev: Int): String = try {
+        java.net.DatagramSocket().use { s ->
+            s.soTimeout = 1500
+            val h = byteArrayOf('B'.code.toByte(), 'J'.code.toByte(), 'N'.code.toByte(), 'P'.code.toByte(), dev.toByte(), 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0)
+            s.send(java.net.DatagramPacket(h, h.size, java.net.InetAddress.getByName(ip), port))
+            val buf = ByteArray(512)
+            s.receive(java.net.DatagramPacket(buf, buf.size))
+            "répond"
+        }
+    } catch (e: Exception) {
+        "muet"
+    }
+
+    suspend fun run(ctx: Context, ip: String): String = withContext(Dispatchers.IO) {
         if (ip.isBlank()) return@withContext "Adresse vide"
-        val ports = listOf(80 to "page web", 443 to "HTTPS", 631 to "IPP", 8611 to "BJNP Canon", 9100 to "RAW")
+        val ports = listOf(80 to "page web", 443 to "HTTPS", 631 to "IPP", 8611 to "BJNP TCP", 9100 to "RAW", 515 to "LPD")
         coroutineScope {
+            val mdns = async {
+                runCatching { Discovery.search(ctx, 5) }.getOrDefault(emptyList()).firstOrNull { it.ip == ip }
+            }
             val portJobs = ports.map { (p, n) -> async { "Port $p ($n) : ${if (portOpen(ip, p, 1500)) "ouvert" else "fermé"}" } }
-            val esclJobs = listOf("http://$ip", "https://$ip").map { b ->
+            val udpJobs = listOf(
+                async { "BJNP UDP 8611 (impression) : ${bjnpUdp(ip, 8611, 1)}" },
+                async { "BJNP UDP 8612 (scanner) : ${bjnpUdp(ip, 8612, 2)}" },
+            )
+            val found = mdns.await()
+            if (found != null) PrinterPrefs(ctx).applyHints(found)
+            val esclJobs = Escl.roots(ip).map { b ->
                 async {
                     val r = try {
-                        val c = open("$b/eSCL/ScannerCapabilities", "GET", 4000)
+                        val c = open("$b/ScannerCapabilities", "GET", 4000)
                         val code = c.responseCode
                         c.disconnect()
                         "HTTP $code"
                     } catch (e: Exception) {
                         "aucune réponse"
                     }
-                    "eSCL ${b.substringBefore(':')} : $r"
+                    "eSCL ${b.substringAfter("//").substringAfter('/')} (${b.substringBefore(':')}) : $r"
                 }
             }
-            val ippJob = async {
-                try {
-                    val i = Ipp.query(ip)
-                    "IPP : ${i.model} (${Ipp.endpoint ?: "?"})"
-                } catch (e: Exception) {
-                    "IPP : échec (${e.message})"
-                }
+            val ippLine = try {
+                val i = Ipp.query(ip)
+                "IPP OK : ${i.model}\n  ${Ipp.endpoint ?: "?"}"
+            } catch (e: Exception) {
+                "IPP : échec\n${e.message}"
             }
-            (portJobs.awaitAll() + esclJobs.awaitAll() + ippJob.await()).joinToString("\n")
+            val mdnsLine = if (found == null) "mDNS : rien annoncé pour $ip" else "mDNS « ${found.name} » :\n" + found.summary().prependIndent("  ")
+            (portJobs.awaitAll() + udpJobs.awaitAll() + esclJobs.awaitAll() + ippLine + mdnsLine).joinToString("\n")
         }
     }
 }
@@ -289,7 +337,7 @@ object Ipp {
         ((b[0].toInt() and 0xFF) shl 24) or ((b[1].toInt() and 0xFF) shl 16) or
             ((b[2].toInt() and 0xFF) shl 8) or (b[3].toInt() and 0xFF)
 
-    private val paths = listOf("/ipp/print", "/ipp/printer", "/ipp/port1", "/ipp", "/")
+    private val paths = listOf("/ipp/print", "/ipp/printer", "/ipp", "/ipp/port1", "/printer", "/")
     private fun printerUri(url: String) = "ipp://" + url.substringAfter("://")
 
     private fun base(op: Int, url: String) = IppWriter(op).apply {
@@ -308,25 +356,35 @@ object Ipp {
 
     private fun infoRequest(url: String) = base(0x000B, url).apply { requested(this, infoAttrs) }.end()
 
-    suspend fun query(ip: String): Info = withContext(Dispatchers.IO) {
-        endpoint?.takeIf { it.contains("//$ip:") }?.let { e ->
-            runCatching { return@withContext toInfo(printerGroup(post(e, infoRequest(e)))) }
-        }
-        var last: Exception = IOException("aucun port IPP ouvert (631, 80, 443)")
+    /** Adresse IPP annoncée par mDNS. */
+    @Volatile var hint: String? = null
+
+    private fun candidates(ip: String): List<String> {
+        val list = mutableListOf<String>()
+        hint?.takeIf { it.contains("//$ip:") }?.let { list += it }
+        endpoint?.takeIf { it.contains("//$ip:") }?.let { list += it }
         for (port in listOf(631, 80, 443)) {
-            if (!portOpen(ip, port)) continue
-            for (path in paths) {
-                val url = "${if (port == 443) "https" else "http"}://$ip:$port$path"
-                try {
-                    val info = toInfo(printerGroup(post(url, infoRequest(url))))
-                    endpoint = url
-                    return@withContext info
-                } catch (e: Exception) {
-                    last = IOException("port $port $path : ${e.message}")
-                }
+            if (!portOpen(ip, port, 1500)) continue
+            val scheme = if (port == 443) "https" else "http"
+            paths.forEach { list += "$scheme://$ip:$port$it" }
+        }
+        return list.distinct()
+    }
+
+    suspend fun query(ip: String): Info = withContext(Dispatchers.IO) {
+        val errors = mutableListOf<String>()
+        val urls = candidates(ip)
+        if (urls.isEmpty()) throw IOException("aucun port IPP ouvert (631, 80, 443)")
+        for (url in urls) {
+            try {
+                val info = toInfo(printerGroup(post(url, infoRequest(url), 5000)))
+                endpoint = url
+                return@withContext info
+            } catch (e: Exception) {
+                errors += "  ${url.substringAfter("//$ip")} : ${e.message ?: e.javaClass.simpleName}"
             }
         }
-        throw last
+        throw IOException(errors.joinToString("\n"))
     }
 
     private suspend fun ensure(ip: String): String {
@@ -334,8 +392,8 @@ object Ipp {
         return endpoint ?: throw IOException("IPP indisponible")
     }
 
-    private fun post(url: String, body: ByteArray): ByteArray {
-        val conn = open(url, "POST", 30000).apply {
+    private fun post(url: String, body: ByteArray, read: Int = 30000): ByteArray {
+        val conn = open(url, "POST", read).apply {
             doOutput = true
             setRequestProperty("Content-Type", "application/ipp")
         }
