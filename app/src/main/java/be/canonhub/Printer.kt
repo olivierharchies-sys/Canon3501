@@ -209,8 +209,11 @@ object Escl {
 
     /** Numérise une zone de la vitre et renvoie le JPEG. */
     suspend fun scan(ip: String, dpi: Int, color: Boolean, area: Area = Area.A4): ByteArray = withContext(Dispatchers.IO) {
-        val root = findBase(ip)
-            ?: throw IOException("pas de scanner eSCL sur cette imprimante (modèle trop ancien ?). Utilisez l'appli Canon PRINT pour numériser.")
+        val root = findBase(ip) ?: return@withContext try {
+            PixmaScan.scan(ip, dpi, color, area)
+        } catch (e: Exception) {
+            throw IOException("eSCL absent ; BJNP 8612 : ${e.message}")
+        }
         val post = open("$root/ScanJobs", "POST").apply {
             doOutput = true
             setRequestProperty("Content-Type", "text/xml")
@@ -258,7 +261,7 @@ object Diag {
 
     suspend fun run(ctx: Context, ip: String): String = withContext(Dispatchers.IO) {
         if (ip.isBlank()) return@withContext "Adresse vide"
-        val ports = listOf(80 to "page web", 443 to "HTTPS", 631 to "IPP", 8611 to "BJNP TCP", 9100 to "RAW", 515 to "LPD")
+        val ports = listOf(80 to "page web", 443 to "HTTPS", 631 to "IPP", 8611 to "BJNP TCP", 8612 to "BJNP scan TCP", 9100 to "RAW", 515 to "LPD")
         coroutineScope {
             val mdns = async {
                 runCatching { Discovery.search(ctx, 5) }.getOrDefault(emptyList()).firstOrNull { it.ip == ip }
