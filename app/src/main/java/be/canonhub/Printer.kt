@@ -63,13 +63,35 @@ class PdfPrintAdapter(
     }
 }
 
-private fun open(url: String, method: String): HttpURLConnection =
-    (URL(url).openConnection() as HttpURLConnection).apply {
+/** L'imprimante présente un certificat auto-signé : on l'accepte, uniquement pour son adresse locale. */
+private val trustAll = arrayOf<javax.net.ssl.TrustManager>(object : javax.net.ssl.X509TrustManager {
+    override fun checkClientTrusted(c: Array<java.security.cert.X509Certificate>?, a: String?) {}
+    override fun checkServerTrusted(c: Array<java.security.cert.X509Certificate>?, a: String?) {}
+    override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = arrayOf()
+})
+
+private fun open(url: String, method: String): HttpURLConnection {
+    val conn = URL(url).openConnection() as HttpURLConnection
+    if (conn is javax.net.ssl.HttpsURLConnection) {
+        val ssl = javax.net.ssl.SSLContext.getInstance("TLS")
+        ssl.init(null, trustAll, java.security.SecureRandom())
+        conn.sslSocketFactory = ssl.socketFactory
+        conn.hostnameVerifier = javax.net.ssl.HostnameVerifier { _, _ -> true }
+    }
+    return conn.apply {
         requestMethod = method
         connectTimeout = 5000
         readTimeout = 60000
         instanceFollowRedirects = false
     }
+}
+
+private fun portOpen(ip: String, port: Int): Boolean = try {
+    java.net.Socket().use { it.connect(java.net.InetSocketAddress(ip, port), 2000) }
+    true
+} catch (e: Exception) {
+    false
+}
 
 /** Numérisation via eSCL (AirScan), supporté par la plupart des multifonctions Canon récents. */
 object Escl {
@@ -92,9 +114,23 @@ object Escl {
   <pwg:DocumentFormat>image/jpeg</pwg:DocumentFormat>
 </scan:ScanSettings>"""
 
+    /** Cherche l'adresse (HTTP puis HTTPS) où le scanner répond en eSCL. */
+    private fun findBase(ip: String): String? =
+        listOf("http://$ip", "https://$ip").firstOrNull { b ->
+            try {
+                val c = open("$b/eSCL/ScannerCapabilities", "GET")
+                val ok = c.responseCode == 200
+                c.disconnect()
+                ok
+            } catch (e: Exception) {
+                false
+            }
+        }
+
     /** Numérise une page A4 depuis la vitre et renvoie le JPEG. */
     suspend fun scan(ip: String, dpi: Int, color: Boolean): ByteArray = withContext(Dispatchers.IO) {
-        val root = "http://$ip"
+        val root = findBase(ip)
+            ?: throw IOException("ce scanner ne répond pas en eSCL (ni HTTP ni HTTPS)")
         val post = open("$root/eSCL/ScanJobs", "POST").apply {
             doOutput = true
             setRequestProperty("Content-Type", "text/xml")
@@ -137,15 +173,26 @@ object Diag {
         sb.appendLine("Port 80 (page web) : ${port(80)}")
         sb.appendLine("Port 631 (IPP, encre) : ${port(631)}")
         sb.appendLine("Port 443 (HTTPS) : ${port(443)}")
-        val escl = try {
-            val c = open("http://$ip/eSCL/ScannerCapabilities", "GET")
-            val r = c.responseCode
+        val home = try {
+            val c = open("http://$ip/", "GET")
+            val s = "HTTP ${c.responseCode} ${c.getHeaderField("Server") ?: ""}"
             c.disconnect()
-            "HTTP $r"
+            s
         } catch (e: Exception) {
             "aucune réponse"
         }
-        sb.appendLine("Scanner eSCL : $escl")
+        sb.appendLine("Page d'accueil : $home")
+        for (b in listOf("http://$ip", "https://$ip")) {
+            val r = try {
+                val c = open("$b/eSCL/ScannerCapabilities", "GET")
+                val code = c.responseCode
+                c.disconnect()
+                "HTTP $code"
+            } catch (e: Exception) {
+                "aucune réponse"
+            }
+            sb.appendLine("eSCL ${b.substringBefore(':')} : $r")
+        }
         val ipp = try { Ipp.query(ip).model } catch (e: Exception) { "échec (${e.message})" }
         sb.append("IPP : $ipp")
         sb.toString()
@@ -162,19 +209,22 @@ object Ipp {
         ((b[0].toInt() and 0xFF) shl 24) or ((b[1].toInt() and 0xFF) shl 16) or
             ((b[2].toInt() and 0xFF) shl 8) or (b[3].toInt() and 0xFF)
 
-    suspend fun query(ip: String): Info {
-        var last: Exception = IOException("aucune réponse")
-        for (path in listOf("/ipp/print", "/ipp/port1", "/ipp")) {
-            try {
-                return queryPath(ip, path)
-            } catch (e: Exception) {
-                last = e
+    suspend fun query(ip: String): Info = withContext(Dispatchers.IO) {
+        var last: Exception = IOException("aucun port IPP ouvert (631, 80, 443)")
+        for (port in listOf(631, 80, 443)) {
+            if (!portOpen(ip, port)) continue
+            for (path in listOf("/ipp/print", "/ipp/port1", "/ipp")) {
+                try {
+                    return@withContext queryPath(ip, port, path)
+                } catch (e: Exception) {
+                    last = IOException("port $port $path : ${e.message}")
+                }
             }
         }
         throw last
     }
 
-    private suspend fun queryPath(ip: String, path: String): Info = withContext(Dispatchers.IO) {
+    private suspend fun queryPath(ip: String, port: Int, path: String): Info = withContext(Dispatchers.IO) {
         val out = ByteArrayOutputStream()
         fun w16(v: Int) { out.write(v shr 8); out.write(v and 0xFF) }
         fun attr(tag: Int, name: String, value: String) {
@@ -195,7 +245,7 @@ object Ipp {
         ).forEachIndexed { i, n -> attr(0x44, if (i == 0) "requested-attributes" else "", n) }
         out.write(0x03)
 
-        val conn = open("http://$ip:631$path", "POST").apply {
+        val conn = open("${if (port == 443) "https" else "http"}://$ip:$port$path", "POST").apply {
             doOutput = true
             readTimeout = 8000
             setRequestProperty("Content-Type", "application/ipp")
