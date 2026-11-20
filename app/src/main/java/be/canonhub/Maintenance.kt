@@ -3,7 +3,6 @@ package be.canonhub
 import android.content.Context
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.net.DatagramPacket
 import java.net.DatagramSocket
@@ -132,21 +131,4 @@ object Bjnp {
             runCatching { udp(ip, CLOSE, 3, session, ByteArray(0)) }
         }
     }
-}
-
-/** Petit utilitaire pour assembler les requêtes IPP. */
-class IppWriter(op: Int) {
-    val out = ByteArrayOutputStream()
-    private fun w16(v: Int) { out.write(v shr 8); out.write(v and 0xFF) }
-    init {
-        out.write(2); out.write(0); w16(op)
-        out.write(byteArrayOf(0, 0, 0, 1))
-        out.write(0x01)
-    }
-    fun attr(tag: Int, name: String, value: String) {
-        out.write(tag)
-        val n = name.toByteArray(); w16(n.size); out.write(n)
-        val b = value.toByteArray(); w16(b.size); out.write(b)
-    }
-    fun end(): ByteArray { out.write(0x03); return out.toByteArray() }
 }
