@@ -33,7 +33,7 @@ enum class Tool(val label: String, val bjl: String, val desc: String, val heavy:
         "Contre les traces au verso. Pliez une feuille A4 en deux, dépliez-la, chargez-la pli vers le haut."),
 }
 
-enum class Transport(val label: String) { Auto("Auto"), Bjnp("BJNP"), Ipp("IPP"), Raw("Port 9100") }
+enum class Transport(val label: String) { Auto("Auto"), Lpd("LPD 515"), Bjnp("BJNP"), Ipp("IPP"), Raw("Port 9100") }
 
 /** Mémorise la date du dernier lancement de chaque outil. */
 class ToolLog(ctx: Context) {
@@ -55,11 +55,12 @@ object CanonTools {
     /** Envoie la commande ; renvoie le transport qui l'a acceptée. */
     suspend fun run(ip: String, t: Tool, mode: Transport): String = withContext(Dispatchers.IO) {
         val data = payload(t)
-        val order = if (mode == Transport.Auto) listOf(Transport.Bjnp, Transport.Raw, Transport.Ipp) else listOf(mode)
+        val order = if (mode == Transport.Auto) listOf(Transport.Lpd, Transport.Bjnp, Transport.Raw, Transport.Ipp) else listOf(mode)
         val errors = mutableListOf<String>()
         for (tr in order) {
             try {
                 when (tr) {
+                    Transport.Lpd -> Lpd.send(ip, data, "Maintenance")
                     Transport.Bjnp -> Bjnp.send(ip, data)
                     Transport.Raw -> raw(ip, data)
                     Transport.Ipp -> Ipp.printRaw(ip, data)
@@ -114,6 +115,23 @@ object Bjnp {
 
     private fun u16(d: ByteArray, i: Int) = ((d[i].toInt() and 0xFF) shl 8) or (d[i + 1].toInt() and 0xFF)
 
+    /** Identifiant IEEE 1284 (modèle, langages) via UDP. */
+    fun deviceId(ip: String): String {
+        val r = udp(ip, 0x30, 1, 0, ByteArray(0))
+        if (r.size < 18 || String(r, 0, 4) != "BJNP") throw IOException("réponse BJNP invalide")
+        val len = u16(r, 16)
+        val start = 18
+        val end = minOf(r.size, start + maxOf(0, len - 2))
+        return String(r, start, end - start).trim()
+    }
+
+    /** Champs lisibles de l'identifiant (MFG, MDL, CMD…). */
+    fun fields(id: String): List<Pair<String, String>> = id.split(';').mapNotNull { f ->
+        val k = f.substringBefore(':', "").trim()
+        val v = f.substringAfter(':', "").trim()
+        if (k.isEmpty() || v.isEmpty()) null else k to v
+    }
+
     fun send(ip: String, data: ByteArray) {
         val details = ByteArray(8) + field("android", 64) + field("canonhub", 64) + field("Maintenance", 256)
         val r = udp(ip, JOB_DETAILS, 1, 0, details)
@@ -129,6 +147,46 @@ object Bjnp {
             }
         } finally {
             runCatching { udp(ip, CLOSE, 3, session, ByteArray(0)) }
+        }
+    }
+}
+
+/** Impression LPD (RFC 1179), file « auto » annoncée par l'imprimante. */
+object Lpd {
+    private fun ack(i: java.io.InputStream, step: String) {
+        val b = i.read()
+        if (b != 0) throw IOException("refus LPD ($step, code $b)")
+    }
+
+    fun send(ip: String, data: ByteArray, job: String) {
+        var last: Exception = IOException("LPD indisponible")
+        for (queue in listOf("auto", "raw", "lp")) {
+            try {
+                sendQueue(ip, queue, data, job)
+                return
+            } catch (e: Exception) {
+                last = IOException("file $queue : ${e.message}")
+            }
+        }
+        throw last
+    }
+
+    private fun sendQueue(ip: String, queue: String, data: ByteArray, job: String) {
+        Socket().use { s ->
+            s.connect(InetSocketAddress(ip, 515), 2500)
+            s.soTimeout = 8000
+            val o = s.getOutputStream()
+            val i = s.getInputStream()
+            val n = (System.currentTimeMillis() % 1000).toString().padStart(3, '0')
+            val host = "android"
+            val df = "dfA$n$host"
+            val cf = "cfA$n$host"
+            o.write("\u0002$queue\n".toByteArray()); o.flush(); ack(i, "file")
+            val ctl = "H$host\nPcanonhub\nJ$job\nl$df\nU$df\nN$job\n".toByteArray()
+            o.write("\u0002${ctl.size} $cf\n".toByteArray()); o.flush(); ack(i, "contrôle")
+            o.write(ctl); o.write(0); o.flush(); ack(i, "contrôle reçu")
+            o.write("\u0003${data.size} $df\n".toByteArray()); o.flush(); ack(i, "données")
+            o.write(data); o.write(0); o.flush(); ack(i, "données reçues")
         }
     }
 }

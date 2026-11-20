@@ -21,6 +21,11 @@ Application Kotlin / Jetpack Compose pour piloter une imprimante multifonction C
 
 Widget « Canon : encre » : niveaux, Scan, Test des buses, actualisation.
 
+## Constat sur la G3501 (diagnostic)
+- Ouverts : 80, 443, LPD 515 (file « auto »), BJNP UDP 8611/8612.
+- Absents : IPP (631), eSCL, RAW 9100.
+- Conséquences : impression via le service Canon d'Android ; outils d'entretien via LPD ; pas de niveaux d'encre réseau ; scan non disponible sans protocole BJNP scanner.
+
 ## Limites connues
 - Code non compilé ni testé sur l'imprimante : prévoyez de petits ajustements au premier essai.
 - Le scan suppose que l'imprimante expose eSCL en HTTP. Si elle n'accepte que HTTPS, il faudra adapter `Escl` dans `Printer.kt`.

@@ -52,7 +52,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import android.graphics.Color as AColor
 
 // ---------- Encre et état ----------
@@ -97,7 +99,10 @@ fun InkScreen(m: Modifier, prefs: PrinterPrefs, ip: String) {
 
     Column(m.padding(16.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
-        err?.let { Text("Imprimante injoignable : $it", color = MaterialTheme.colorScheme.error) }
+        err?.let {
+            Text("Niveaux indisponibles : $it", color = MaterialTheme.colorScheme.error)
+            Text("La G3000 n'a pas de capteur réseau des réservoirs : contrôlez les niveaux à l'œil.")
+        }
         info?.let { i ->
             ElevatedCard(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -325,7 +330,17 @@ fun InfoScreen(m: Modifier, ip: String) {
     fun load() {
         scope.launch {
             loading = true; err = ""
-            try { rows = Ipp.details(ip) } catch (e: Exception) { err = "Échec : ${e.message}" }
+            try {
+                rows = Ipp.details(ip)
+            } catch (e: Exception) {
+                rows = try {
+                    val labels = mapOf("MFG" to "Fabricant", "MDL" to "Modèle", "CMD" to "Langages", "DES" to "Description", "CLS" to "Classe", "VER" to "Version")
+                    withContext(Dispatchers.IO) { Bjnp.fields(Bjnp.deviceId(ip)) }.map { (k, v) -> (labels[k] ?: k) to v }
+                } catch (e2: Exception) {
+                    err = "Échec : ${e.message}\nBJNP : ${e2.message}"; emptyList()
+                }
+                if (rows.isNotEmpty()) err = "IPP absent : infos limitées (protocole Canon BJNP)."
+            }
             loading = false
         }
     }
@@ -333,7 +348,7 @@ fun InfoScreen(m: Modifier, ip: String) {
 
     Column(m.padding(16.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
-        if (err.isNotEmpty()) Text(err, color = MaterialTheme.colorScheme.error)
+        if (err.isNotEmpty()) Text(err, color = if (rows.isEmpty()) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
         rows.forEach { (k, v) ->
             Column {
                 Text(k, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)

@@ -12,8 +12,18 @@ android {
         applicationId = "be.canonhub"
         minSdk = 29
         targetSdk = 35
-        versionCode = 6
-        versionName = "1.2.1"
+        versionCode = 7
+        versionName = "1.3"
+    }
+
+    signingConfigs {
+        getByName("debug") {
+            // Clé fixe : sans elle, chaque build CI a une clé différente et la mise à jour échoue.
+            storeFile = file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
     }
 
     buildTypes {

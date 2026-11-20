@@ -283,6 +283,11 @@ object Diag {
                     "eSCL ${b.substringAfter("//").substringAfter('/')} (${b.substringBefore(':')}) : $r"
                 }
             }
+            val idLine = try {
+                "Identifiant BJNP :\n" + Bjnp.fields(Bjnp.deviceId(ip)).joinToString("\n") { "  ${it.first} : ${it.second}" }
+            } catch (e: Exception) {
+                "Identifiant BJNP : ${e.message}"
+            }
             val ippLine = try {
                 val i = Ipp.query(ip)
                 "IPP OK : ${i.model}\n  ${Ipp.endpoint ?: "?"}"
@@ -290,7 +295,7 @@ object Diag {
                 "IPP : échec\n${e.message}"
             }
             val mdnsLine = if (found == null) "mDNS : rien annoncé pour $ip" else "mDNS « ${found.name} » :\n" + found.summary().prependIndent("  ")
-            (portJobs.awaitAll() + udpJobs.awaitAll() + esclJobs.awaitAll() + ippLine + mdnsLine).joinToString("\n")
+            (portJobs.awaitAll() + udpJobs.awaitAll() + esclJobs.awaitAll() + idLine + ippLine + mdnsLine).joinToString("\n")
         }
     }
 }
@@ -363,6 +368,7 @@ object Ipp {
         val list = mutableListOf<String>()
         hint?.takeIf { it.contains("//$ip:") }?.let { list += it }
         endpoint?.takeIf { it.contains("//$ip:") }?.let { list += it }
+        if (!portOpen(ip, 631, 1500)) return list.distinct()
         for (port in listOf(631, 80, 443)) {
             if (!portOpen(ip, port, 1500)) continue
             val scheme = if (port == 443) "https" else "http"
@@ -374,7 +380,7 @@ object Ipp {
     suspend fun query(ip: String): Info = withContext(Dispatchers.IO) {
         val errors = mutableListOf<String>()
         val urls = candidates(ip)
-        if (urls.isEmpty()) throw IOException("aucun port IPP ouvert (631, 80, 443)")
+        if (urls.isEmpty()) throw IOException("IPP non géré par cette imprimante (port 631 fermé)")
         for (url in urls) {
             try {
                 val info = toInfo(printerGroup(post(url, infoRequest(url), 5000)))
