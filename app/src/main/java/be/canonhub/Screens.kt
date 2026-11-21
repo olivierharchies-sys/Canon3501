@@ -230,12 +230,13 @@ fun MaintenanceScreen(m: Modifier, prefs: PrinterPrefs, ip: String, go: (Screen)
                 }
                 msg = "Web : $webErr\nEssai par les autres modes…"
             }
+            val webNote = if (t.rui != null && transport == Transport.Auto) msg.substringBefore("\nEssai") + "\n" else ""
             val base = ToolWatch.snapshot(ip)
             var ok = false
             msg = try {
                 val via = CanonTools.run(ip, t, if (transport == Transport.Auto && t.rui != null) Transport.Bjnp else transport, prefs.ruiPassword)
                 log.mark(t); prefs.lastPrint = System.currentTimeMillis(); refresh++; ok = true
-                "${t.label} : commande acceptée ($via)."
+                webNote + "${t.label} : commande acceptée ($via)."
             } catch (e: Exception) {
                 "${t.label} : échec.\n${e.message}\nLancez-la depuis le menu de l'imprimante."
             }
