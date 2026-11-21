@@ -129,7 +129,7 @@ object Gutenprint {
     suspend fun testPage(ctx: Context, ip: String, sel: Map<String, String>, dpi: Int, onStep: (String) -> Unit): String {
         val f = File(ctx.cacheDir, "gp-test.png")
         withContext(Dispatchers.IO) { f.outputStream().use { Calib.chart().compress(Bitmap.CompressFormat.PNG, 100, it) } }
-        return try { print(ctx, ip, Uri.fromFile(f), "image/png", sel, false, false, dpi, onStep, truePage = true) } finally { f.delete() }
+        return try { print(ctx, ip, Uri.fromFile(f), "image/png", sel, false, false, dpi, truePage = true, onStep = onStep) } finally { f.delete() }
     }
 
     /**
@@ -209,8 +209,8 @@ object Gutenprint {
     suspend fun print(
         ctx: Context, ip: String, uri: Uri, mime: String,
         sel: Map<String, String>, borderless: Boolean, fill: Boolean, dpi: Int,
-        onStep: (String) -> Unit,
         truePage: Boolean = false,
+        onStep: (String) -> Unit,
     ): String = withContext(Dispatchers.IO) {
         init(ctx)
         val t = tune(ctx)
