@@ -100,8 +100,9 @@ fun InkScreen(m: Modifier, prefs: PrinterPrefs, ip: String) {
     Column(m.padding(16.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
         err?.let {
-            Text("Niveaux indisponibles : $it", color = MaterialTheme.colorScheme.error)
+            Text("Niveaux IPP indisponibles.", color = MaterialTheme.colorScheme.error)
             Text("La G3000 n'a pas de capteur réseau des réservoirs : contrôlez les niveaux à l'œil.")
+            BjnpState(ip)
         }
         info?.let { i ->
             ElevatedCard(Modifier.fillMaxWidth()) {
@@ -500,5 +501,27 @@ fun SettingsScreen(m: Modifier, prefs: PrinterPrefs, ip: String, onSave: (String
         }
         Text("Vérification toutes les 12 h environ. Widget « Canon : encre » disponible sur l'écran d'accueil.", style = MaterialTheme.typography.bodySmall)
         OutlinedButton(onClick = { WatchWorker.now(ctx); msg = "Vérification lancée." }) { Text("Vérifier maintenant") }
+    }
+}
+
+/** État lu par BJNP (identifiant Canon), quand IPP est absent. */
+@Composable
+fun BjnpState(ip: String) {
+    val rows by androidx.compose.runtime.produceState<List<Pair<String, String>>?>(null, ip) {
+        value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            runCatching { Bjnp.fields(Bjnp.deviceId(ip)) }.getOrDefault(emptyList())
+        }
+    }
+    val r = rows ?: return
+    if (r.isEmpty()) return
+    val labels = mapOf("MFG" to "Fabricant", "MDL" to "Modèle", "CMD" to "Langages", "DES" to "Description", "STS" to "État", "VER" to "Version")
+    ElevatedCard(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text("État BJNP", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            r.forEach { (k, v) ->
+                Text(labels[k] ?: k, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                Text(v, style = MaterialTheme.typography.bodyMedium)
+            }
+        }
     }
 }

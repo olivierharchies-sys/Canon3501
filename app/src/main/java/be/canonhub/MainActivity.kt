@@ -19,6 +19,9 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.background
+import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -123,7 +126,7 @@ class MainActivity : ComponentActivity() {
 enum class Screen(val title: String) {
     Home("Canon G3000"), Print("Imprimer"), Scan("Numériser"), Copy("Copier"),
     Ink("Encre et état"), Maintenance("Entretien"), Queue("File d'attente"),
-    Info("Infos imprimante"), Settings("Réglages")
+    Info("Infos imprimante"), Settings("Réglages"), History("Documents")
 }
 
 fun sharedUri(i: Intent): Uri? = when (i.action) {
@@ -157,6 +160,22 @@ fun App(prefs: PrinterPrefs, incoming: Intent?, consumed: () -> Unit) {
                 }
             },
         )
+    }, bottomBar = {
+        androidx.compose.material3.NavigationBar {
+            listOf(
+                Triple(Screen.Home, "Accueil", Icons.Filled.Home),
+                Triple(Screen.Scan, "Numériser", Icons.Filled.DocumentScanner),
+                Triple(Screen.Print, "Imprimer", Icons.Filled.Print),
+                Triple(Screen.History, "Documents", Icons.Filled.Folder),
+            ).forEach { (sc, label, icon) ->
+                androidx.compose.material3.NavigationBarItem(
+                    selected = screen == sc,
+                    onClick = { screen = sc },
+                    icon = { Icon(icon, null) },
+                    label = { Text(label) },
+                )
+            }
+        }
     }) { pad ->
         val m = Modifier.padding(pad)
         val go: (Screen) -> Unit = { screen = it }
@@ -172,6 +191,7 @@ fun App(prefs: PrinterPrefs, incoming: Intent?, consumed: () -> Unit) {
             Screen.Queue -> if (ip.isBlank()) needIp() else QueueScreen(m, ip)
             Screen.Info -> if (ip.isBlank()) needIp() else InfoScreen(m, ip)
             Screen.Settings -> SettingsScreen(m, prefs, ip, setIp)
+            Screen.History -> HistoryScreen(m)
         }
     }
 }
@@ -204,6 +224,7 @@ fun HomeScreen(m: Modifier, prefs: PrinterPrefs, ip: String, setIp: (String) -> 
         Tile("Encre et état", "Niveaux, alertes", Icons.Filled.WaterDrop, Color(0xFF8E24AA), Screen.Ink, needsIpp = true),
         Tile("File d'attente", "Tâches, annulation", Icons.Filled.HourglassEmpty, Color(0xFF6D4C41), Screen.Queue, needsIpp = true),
         Tile("Infos", "Firmware, compteurs", Icons.Filled.Info, Color(0xFF3949AB), Screen.Info, needsIpp = true),
+        Tile("Documents", "Scans enregistrés", Icons.Filled.Folder, Color(0xFFC62828), Screen.History),
         Tile("Réglages", "Imprimantes, alertes", Icons.Filled.Settings, Color(0xFF546E7A), Screen.Settings),
     )
     val profiles = remember { prefs.profiles }
@@ -267,6 +288,7 @@ fun StatusCard(
                 }
                 IconButton(onClick = onRefresh) { Icon(Icons.Filled.Refresh, "Actualiser") }
             }
+            if (status?.online == false) FindPrinter(ip, setIp)
             if (profiles.size >= 2) {
                 Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     profiles.forEach { p ->
@@ -276,6 +298,33 @@ fun StatusCard(
             }
         }
     }
+}
+
+/** Imprimante hors ligne : recherche mDNS d'une Canon à une autre adresse (IP changée par la box). */
+@Composable
+fun FindPrinter(ip: String, setIp: (String) -> Unit) {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var busy by remember { mutableStateOf(false) }
+    var msg by remember { mutableStateOf("") }
+    Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+        OutlinedButton(enabled = !busy, onClick = {
+            scope.launch {
+                busy = true; msg = "Recherche sur le Wi-Fi…"
+                val found = runCatching { Discovery.search(ctx, 6) }.getOrDefault(emptyList())
+                    .filter { it.ip != ip && (it.name.contains("Canon", true) || it.services.any { s -> s.txt["mfg"].orEmpty().contains("Canon", true) }) }
+                msg = when (found.size) {
+                    0 -> "Aucune Canon trouvée. Imprimante allumée et sur le même Wi-Fi ?"
+                    else -> { setIp(found[0].ip); "Nouvelle adresse : ${found[0].ip}" }
+                }
+                busy = false
+            }
+        }) {
+            Icon(Icons.Filled.Search, null, Modifier.size(18.dp))
+            Text(" Retrouver l'imprimante")
+        }
+    }
+    if (msg.isNotEmpty()) Text(msg, style = MaterialTheme.typography.bodySmall)
 }
 
 @Composable
@@ -526,7 +575,7 @@ fun ScanOptions(
             }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            listOf(150, 300, 600).forEach { d ->
+            listOf(75, 150, 300, 600).forEach { d ->
                 FilterChip(selected = dpi == d, onClick = { onDpi(d) }, label = { Text("$d dpi") })
             }
         }
@@ -549,6 +598,10 @@ fun ScanScreen(m: Modifier, ip: String) {
     var msg by remember { mutableStateOf("") }
     var pages by remember { mutableStateOf<List<ByteArray>>(emptyList()) }
     var preview by remember { mutableStateOf<Bitmap?>(null) }
+    var progress by remember { mutableFloatStateOf(0f) }
+    var job by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+    var ocrPdf by remember { mutableStateOf(false) }
+    var ocrText by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(pages.lastOrNull(), crop, bright, contrast) {
         val last = pages.lastOrNull()
@@ -558,15 +611,30 @@ fun ScanScreen(m: Modifier, ip: String) {
     fun full(b: ByteArray) = Images.process(b, 3508, crop, bright, contrast)
 
     fun work(label: String, block: suspend () -> String) {
-        scope.launch {
-            busy = true; msg = label
-            msg = try { block() } catch (e: Exception) { "Échec : ${e.message}" }
-            busy = false
+        job = scope.launch {
+            busy = true; msg = label; progress = 0f
+            msg = try {
+                block()
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                "Annulé."
+            } catch (e: Exception) {
+                "Échec : ${e.message}"
+            }
+            busy = false; job = null
         }
     }
 
     suspend fun pdfUri(): Uri = withContext(Dispatchers.IO) {
-        Images.savePdf(ctx) { out -> Images.pdfFromScans(pages, out) { full(it) } } ?: throw IOException("enregistrement impossible")
+        val u = if (ocrPdf) {
+            val done = pages.map { p ->
+                val b = Images.process(p, 2480, crop, bright, contrast) ?: throw IOException("image illisible")
+                b to runCatching { Ocr.read(b) }.getOrNull()
+            }
+            Images.savePdf(ctx) { out -> Ocr.searchablePdf(done, out) }
+        } else {
+            Images.savePdf(ctx) { out -> Images.pdfFromScans(pages, out) { full(it) } }
+        }
+        u ?: throw IOException("enregistrement impossible")
     }
 
     Column(m.padding(16.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -576,14 +644,31 @@ fun ScanScreen(m: Modifier, ip: String) {
             modifier = Modifier.fillMaxWidth(),
             onClick = {
                 work("Numérisation en cours…") {
-                    val b = Escl.scan(ip, dpi, color, area)
+                    val b = Escl.scan(ip, dpi, color, area) { progress = it }
                     pages = pages + listOf(b)
                     "${pages.size} page(s) numérisée(s)."
                 }
             },
         ) { Text(if (pages.isEmpty()) "Numériser" else "Ajouter une page (${pages.size + 1})") }
-        if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+        if (busy) {
+            Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                if (progress > 0f) {
+                    LinearProgressIndicator(progress = { progress }, modifier = Modifier.weight(1f))
+                    Text(" ${(progress * 100).toInt()} %")
+                } else {
+                    LinearProgressIndicator(Modifier.weight(1f))
+                }
+                androidx.compose.material3.TextButton(onClick = { job?.cancel() }) { Text("Annuler") }
+            }
+        }
         if (msg.isNotEmpty()) Text(msg)
+        if (pages.isEmpty() && !busy) {
+            Text(
+                "Posez le document face contre la vitre, coin repère en haut à gauche. 75 dpi = aperçu rapide.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
 
         if (pages.isNotEmpty()) {
             Toggle("Recadrage automatique", crop) { crop = it }
@@ -593,16 +678,17 @@ fun ScanScreen(m: Modifier, ip: String) {
             Slider(value = contrast, onValueChange = { contrast = it }, valueRange = 0.5f..2f)
             preview?.let { Image(it.asImageBitmap(), "Aperçu", Modifier.fillMaxWidth()) }
             Text("${pages.size} page(s). Les réglages s'appliquent à toutes les pages.", style = MaterialTheme.typography.bodySmall)
+            Toggle("PDF avec texte cherchable (OCR)", ocrPdf) { ocrPdf = it }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(enabled = !busy, onClick = {
-                    work("Création du PDF…") { pdfUri(); "PDF enregistré dans Téléchargements/Canon" }
+                    work(if (ocrPdf) "Création du PDF (OCR)…" else "Création du PDF…") { pdfUri(); "PDF enregistré (Historique)." }
                 }) { Text("PDF") }
                 Button(enabled = !busy, onClick = {
                     work("Enregistrement…") {
                         withContext(Dispatchers.IO) {
                             pages.forEach { p -> full(p)?.let { Images.saveJpeg(ctx, Images.jpeg(it)) } }
                         }
-                        "JPEG enregistré(s) dans Images/Canon"
+                        "JPEG enregistré(s) (Historique)."
                     }
                 }) { Text("JPEG") }
                 OutlinedButton(enabled = !busy, onClick = {
@@ -635,6 +721,40 @@ fun ScanScreen(m: Modifier, ip: String) {
                 OutlinedButton(enabled = !busy, onClick = { pages = pages.dropLast(1); msg = "" }) { Text("Suppr. dernière") }
                 OutlinedButton(enabled = !busy, onClick = { pages = emptyList(); msg = "" }) { Text("Effacer") }
             }
+            OutlinedButton(enabled = !busy, modifier = Modifier.fillMaxWidth(), onClick = {
+                work("Lecture du texte…") {
+                    val txt = withContext(Dispatchers.Default) {
+                        pages.mapNotNull { p -> Images.process(p, 2480, crop, bright, contrast) }
+                    }.map { Ocr.read(it).text }.joinToString("\n\n")
+                    ocrText = txt
+                    if (txt.isBlank()) "Aucun texte détecté." else ""
+                }
+            }) { Text("Extraire le texte (OCR)") }
+        }
+        ocrText?.let { t ->
+            androidx.compose.material3.AlertDialog(
+                onDismissRequest = { ocrText = null },
+                title = { Text("Texte reconnu") },
+                text = {
+                    androidx.compose.foundation.text.selection.SelectionContainer {
+                        Text(t, modifier = Modifier.verticalScroll(rememberScrollState()))
+                    }
+                },
+                confirmButton = {
+                    androidx.compose.material3.TextButton(onClick = {
+                        val cm = ctx.getSystemService(android.content.ClipboardManager::class.java)
+                        cm.setPrimaryClip(android.content.ClipData.newPlainText("OCR", t))
+                        ocrText = null
+                    }) { Text("Copier") }
+                },
+                dismissButton = {
+                    androidx.compose.material3.TextButton(onClick = {
+                        ctx.startActivity(
+                            Intent.createChooser(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, t), "Partager"),
+                        )
+                    }) { Text("Partager") }
+                },
+            )
         }
     }
 }

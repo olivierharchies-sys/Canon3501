@@ -178,3 +178,21 @@ class InkWidget : AppWidgetProvider() {
         }
     }
 }
+
+/** Tuile des réglages rapides : ouvre directement l'écran Numériser. */
+class ScanTile : android.service.quicksettings.TileService() {
+    override fun onClick() {
+        super.onClick()
+        val i = Intent(this, MainActivity::class.java)
+            .putExtra("screen", Screen.Scan.name)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        if (android.os.Build.VERSION.SDK_INT >= 34) {
+            startActivityAndCollapse(
+                PendingIntent.getActivity(this, 40, i, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT),
+            )
+        } else {
+            @Suppress("DEPRECATION")
+            startActivityAndCollapse(i)
+        }
+    }
+}

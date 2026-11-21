@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut android:shortcutId="scan" android:enabled="true" android:icon="@drawable/ic_sc_scan"
+        android:shortcutShortLabel="@string/sc_scan">
+        <intent android:action="android.intent.action.VIEW"
+            android:targetPackage="be.canonhub" android:targetClass="be.canonhub.MainActivity">
+            <extra android:name="screen" android:value="Scan" />
+        </intent>
+    </shortcut>
+    <shortcut android:shortcutId="copy" android:enabled="true" android:icon="@drawable/ic_sc_copy"
+        android:shortcutShortLabel="@string/sc_copy">
+        <intent android:action="android.intent.action.VIEW"
+            android:targetPackage="be.canonhub" android:targetClass="be.canonhub.MainActivity">
+            <extra android:name="screen" android:value="Copy" />
+        </intent>
+    </shortcut>
+    <shortcut android:shortcutId="print" android:enabled="true" android:icon="@drawable/ic_sc_print"
+        android:shortcutShortLabel="@string/sc_print">
+        <intent android:action="android.intent.action.VIEW"
+            android:targetPackage="be.canonhub" android:targetClass="be.canonhub.MainActivity">
+            <extra android:name="screen" android:value="Print" />
+        </intent>
+    </shortcut>
+</shortcuts>

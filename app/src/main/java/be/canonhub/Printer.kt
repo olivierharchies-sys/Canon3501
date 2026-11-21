@@ -208,9 +208,11 @@ object Escl {
         }
 
     /** Numérise une zone de la vitre et renvoie le JPEG. */
-    suspend fun scan(ip: String, dpi: Int, color: Boolean, area: Area = Area.A4): ByteArray = withContext(Dispatchers.IO) {
+    suspend fun scan(ip: String, dpi: Int, color: Boolean, area: Area = Area.A4, progress: (Float) -> Unit = {}): ByteArray = withContext(Dispatchers.IO) {
         val root = findBase(ip) ?: return@withContext try {
-            PixmaScan.scan(ip, dpi, color, area)
+            PixmaScan.scan(ip, dpi, color, area, progress)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Exception) {
             throw IOException("eSCL absent ; BJNP 8612 : ${e.message}")
         }

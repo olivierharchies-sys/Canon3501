@@ -2,6 +2,7 @@ package be.canonhub
 
 import android.graphics.Bitmap
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
 import java.io.Closeable
@@ -192,7 +193,7 @@ object PixmaScan {
     }
 
     /** Numérise une zone de la vitre (toujours en couleur, gris converti ensuite) et renvoie un JPEG. */
-    suspend fun scan(ip: String, dpi: Int, color: Boolean, area: Area): ByteArray = withContext(Dispatchers.IO) {
+    suspend fun scan(ip: String, dpi: Int, color: Boolean, area: Area, progress: (Float) -> Unit = {}): ByteArray = withContext(Dispatchers.IO) {
         val outW = area.w * dpi / 300
         val rawW = (outW + 31) / 32 * 32
         val lines = area.h * dpi / 300
@@ -217,6 +218,7 @@ object PixmaScan {
                 bmp.setPixels(row, 0, outW, 0, y, outW, 1)
                 y++; p += lineBytes
             }
+            if (p > 0) progress(y.toFloat() / lines)
             pending.reset(); pending.write(buf, p, buf.size - p)
         }
 
@@ -239,12 +241,14 @@ object PixmaScan {
             for (i in 0 until 120) {
                 val st = exec(l, STATUS_3, dataIn = 8)
                 if (st.size > 8 && (st[8].toInt() and 0x03) != 0) break
+                ensureActive()
                 Thread.sleep(1000)
             }
             Thread.sleep(1000)
 
             var last = 0
             while ((last and 0x28) != 0x28 && y < lines) {
+                ensureActive()
                 val c = ByteArray(16)
                 be16(c, 0, READ_IMAGE)
                 be32(c, 0x0c, if ((last and 0x20) == 0) BLOCK + 8 else 40)

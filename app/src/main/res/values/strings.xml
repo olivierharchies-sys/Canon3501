@@ -1,4 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Canon G3000</string>
+    <string name="sc_scan">Numériser</string>
+    <string name="sc_copy">Copier</string>
+    <string name="sc_print">Imprimer</string>
+    <string name="tile_scan">Scanner Canon</string>
 </resources>

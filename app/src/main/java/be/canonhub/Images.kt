@@ -20,6 +20,10 @@ import android.graphics.Color as AColor
 
 /** Traitements d'image et fabrication de PDF. */
 object Images {
+    /** Nom de fichier daté : Scan_2026-11-21_01-10-05. */
+    fun stamp(prefix: String = "Scan"): String =
+        prefix + "_" + java.text.SimpleDateFormat("yyyy-MM-dd_HH-mm-ss", java.util.Locale.FRANCE).format(java.util.Date())
+
 
     fun decode(bytes: ByteArray, maxDim: Int): Bitmap? {
         val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -119,7 +123,7 @@ object Images {
 
     fun savePdf(ctx: Context, write: (java.io.OutputStream) -> Unit): Uri? = runCatching {
         val cv = ContentValues().apply {
-            put(MediaStore.Downloads.DISPLAY_NAME, "scan_${System.currentTimeMillis()}.pdf")
+            put(MediaStore.Downloads.DISPLAY_NAME, "${stamp()}.pdf")
             put(MediaStore.Downloads.MIME_TYPE, "application/pdf")
             put(MediaStore.Downloads.RELATIVE_PATH, "Download/Canon")
         }
@@ -130,7 +134,7 @@ object Images {
 
     fun saveJpeg(ctx: Context, data: ByteArray): Uri? = runCatching {
         val cv = ContentValues().apply {
-            put(MediaStore.Images.Media.DISPLAY_NAME, "scan_${System.currentTimeMillis()}.jpg")
+            put(MediaStore.Images.Media.DISPLAY_NAME, "${stamp()}.jpg")
             put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
             put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/Canon")
         }
