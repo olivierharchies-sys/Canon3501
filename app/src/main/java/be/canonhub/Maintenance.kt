@@ -63,7 +63,10 @@ object CanonTools {
     private val BJL_END = "\nBJLEND\n".toByteArray()
 
     /** Une trame par commande, comme les écritures séparées de cmdtocanonij2. */
-    fun parts(t: Tool): List<ByteArray> = listOf(XML_START, XML_MODE, BJL_START + t.bjl.toByteArray() + BJL_END, XML_END)
+    fun parts(t: Tool): List<ByteArray> = listOf(XML_START, XML_MODE, BJL_START + body(t).toByteArray() + BJL_END, XML_END)
+
+    /** Test des buses : validé tel quel. Autres outils : essai avec ControlMode=Common (ancien format Canon). */
+    private fun body(t: Tool): String = if (t == Tool.NozzleCheck) t.bjl else "ControlMode=Common\n${t.bjl}"
 
     fun payload(t: Tool): ByteArray = parts(t).reduce { a, b -> a + b }
 
