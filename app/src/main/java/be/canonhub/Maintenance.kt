@@ -21,11 +21,11 @@ enum class Tool(val label: String, val bjl: String, val desc: String, val heavy:
         "Imprime le motif officiel de vérification des buses. Chargez du papier A4."),
     CleanAll("Nettoyage des têtes", "@Cleaning=1ALL",
         "Nettoyage standard de toutes les couleurs. Refaites ensuite un test des buses."),
-    CleanBlack("Nettoyage noir", "@Cleaning=1BK", "Nettoyage limité à la tête noire."),
+    CleanBlack("Nettoyage noir", "@Cleaning=1K", "Nettoyage limité à la tête noire."),
     CleanColor("Nettoyage couleur", "@Cleaning=1CL", "Nettoyage limité à la tête couleur."),
     DeepClean("Nettoyage en profondeur", "@DeepCleaning=1ALL",
         "Uniquement après deux nettoyages normaux sans effet. Consomme beaucoup d'encre.", heavy = true),
-    Alignment("Alignement des têtes", "@TestPrint=HeadAlignment",
+    Alignment("Alignement des têtes", "@TestPrint=Auto",
         "Imprime la feuille d'alignement. Chargez du papier A4."),
     Roller("Nettoyage des rouleaux", "@RollerCleaning",
         "Retirez le papier du bac arrière avant de lancer."),
@@ -46,11 +46,22 @@ class ToolLog(ctx: Context) {
 }
 
 object CanonTools {
-    private val START = byteArrayOf(0x1B, 0x5B, 0x4B, 0x02, 0x00, 0x00, 0x1F) +
-        "BJLSTART\nControlMode=Common\n".toByteArray()
-    private val END = "BJLEND\n".toByteArray()
+    /** Séquence de cmdtocanonij2 (cnijfilter2, profil canong3000.ppd) : StartJob, ModeShift, BJL, EndJob. */
+    private const val NS = "http://www.canon.com/ns/cmd/2008/07/"
+    private const val HEAD = "<?xml version=\"1.0\" encoding=\"utf-8\" ?>"
+    private const val JOB = "00000001"
+    private val XML_START = ("$HEAD<cmd xmlns:ivec=\"${NS}common/\"><ivec:contents><ivec:operation>StartJob</ivec:operation>" +
+        "<ivec:param_set servicetype=\"print\"><ivec:jobID>$JOB</ivec:jobID><ivec:bidi>0</ivec:bidi>" +
+        "</ivec:param_set></ivec:contents></cmd>").toByteArray()
+    private val XML_MODE = ("$HEAD<cmd xmlns:ivec=\"${NS}common/\" xmlns:vcn=\"${NS}canon/\"><ivec:contents>" +
+        "<ivec:operation>VendorCmd</ivec:operation><ivec:param_set servicetype=\"print\"><ivec:jobID>$JOB</ivec:jobID>" +
+        "<vcn:ijoperation>ModeShift</vcn:ijoperation><vcn:ijmode>1</vcn:ijmode></ivec:param_set></ivec:contents></cmd>").toByteArray()
+    private val XML_END = ("$HEAD<cmd xmlns:ivec=\"${NS}common/\"><ivec:contents><ivec:operation>EndJob</ivec:operation>" +
+        "<ivec:param_set servicetype=\"print\"><ivec:jobID>$JOB</ivec:jobID></ivec:param_set></ivec:contents></cmd>").toByteArray()
+    private val BJL_START = byteArrayOf(0x1B, 0x5B, 0x4B, 0x02, 0x00, 0x00, 0x1F) + "BJLSTART\n".toByteArray()
+    private val BJL_END = "\nBJLEND\n".toByteArray()
 
-    fun payload(t: Tool): ByteArray = START + "${t.bjl}\n".toByteArray() + END
+    fun payload(t: Tool): ByteArray = XML_START + XML_MODE + BJL_START + t.bjl.toByteArray() + BJL_END + XML_END
 
     /** Envoie la commande ; renvoie le transport qui l'a acceptée. */
     suspend fun run(ip: String, t: Tool, mode: Transport): String = withContext(Dispatchers.IO) {
