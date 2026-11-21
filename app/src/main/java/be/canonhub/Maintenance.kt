@@ -180,9 +180,9 @@ object Bjnp {
     }
 
     /** Comme Pixma.Link : numéros de message dès 0, connexion TCP en 3 essais, accusé de réception vérifié. */
-    fun send(ip: String, parts: List<ByteArray>) {
+    fun send(ip: String, parts: Iterable<ByteArray>, title: String = "Maintenance", timeout: Int = 8000) {
         var seq = 0
-        val details = ByteArray(8) + field("android", 64) + field("canonhub", 64) + field("Maintenance", 256)
+        val details = ByteArray(8) + field("android", 64) + field("canonhub", 64) + field(title, 256)
         val r = udp(ip, JOB_DETAILS, seq, 0, details)
         if (r.size < 16 || String(r, 0, 4) != "BJNP") throw IOException("réponse BJNP invalide")
         val session = u16(r, 10)
@@ -196,7 +196,7 @@ object Bjnp {
             }
             if (err != null) throw IOException("TCP $PORT fermé : ${err.message}")
             s.use {
-                it.soTimeout = 8000
+                it.soTimeout = timeout
                 it.tcpNoDelay = true
                 val o = it.getOutputStream()
                 val i = java.io.DataInputStream(it.getInputStream())

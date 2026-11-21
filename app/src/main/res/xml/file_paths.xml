@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Fichiers temporaires partagés vers Canon PRINT. -->
+<paths>
+    <cache-path name="cache" path="." />
+</paths>

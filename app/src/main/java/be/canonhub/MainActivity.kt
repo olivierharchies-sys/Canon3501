@@ -451,6 +451,9 @@ fun androidPrint(ctx: Context, uri: Uri, mime: String) {
     markPrint(ctx)
 }
 
+/** Appli Canon PRINT Inkjet/SELPHY. */
+const val CANON_PRINT = "jp.co.canon.bsd.ad.pixmaprint"
+
 /** Fenêtre Android avec les réglages de l'appli : format, orientation, couleur, brouillon, pages par feuille. */
 suspend fun androidPrintOpts(ctx: Context, uri: Uri, mime: String, o: PrintOpts): String {
     val (u, land) = if (PrintPrep.needsPrep(mime, o)) {
@@ -548,8 +551,36 @@ fun PrintScreen(m: Modifier, prefs: PrinterPrefs, ip: String, shared: Uri?, clea
     var opts by remember { mutableStateOf(printOptsOf(prefs.printOpts)) }
     fun setOpts(o: PrintOpts) { opts = o; prefs.printOpts = o.save() }
 
+    var gpOn by remember { mutableStateOf(prefs.gpEnabled && Gutenprint.available) }
+    var gpSel by remember { mutableStateOf(prefs.gpSel) }
+    var gpChoices by remember { mutableStateOf<Map<String, List<Gutenprint.Choice>>>(emptyMap()) }
+    var gpErr by remember { mutableStateOf("") }
+    LaunchedEffect(gpOn, gpSel) {
+        if (!gpOn) return@LaunchedEffect
+        gpErr = try {
+            gpChoices = Gutenprint.PARAMS.associate { (p, _) -> p to Gutenprint.choices(ctx, p, gpSel) }
+            ""
+        } catch (e: Exception) { "Pilote intégré indisponible : ${e.message}" }
+    }
+
+    /** Pilote intégré : brouillon, N&B ou plusieurs pages par feuille passent d'abord par un PDF préparé. */
+    suspend fun driverPrint(uri: Uri, mime: String): String {
+        if (ip.isBlank()) throw IOException("adresse IP manquante")
+        val (u, m) = if (opts.quality == Quality.Draft || opts.nUp > 1 || !opts.color) {
+            withContext(Dispatchers.IO) { PrintPrep.prepare(ctx, uri, mime, opts) }.first.let { Uri.fromFile(it) to "application/pdf" }
+        } else uri to mime
+        val dpi = when (opts.quality) { Quality.Draft -> 150; Quality.Standard -> 200; Quality.High -> 300 }
+        val r = Gutenprint.print(ctx, ip, u, m, gpSel, opts.borderless, opts.fill, dpi) { msg = it }
+        markPrint(ctx)
+        return r
+    }
+
     suspend fun output(uri: Uri, mime: String): String =
-        if (direct && ip.isNotBlank()) {
+        if (gpOn) {
+            try { driverPrint(uri, mime) } catch (e: Exception) {
+                "Pilote intégré : échec (${e.message}). " + androidPrintOpts(ctx, uri, mime, opts)
+            }
+        } else if (direct && ip.isNotBlank()) {
             try {
                 directPrint(ctx, ip, uri, mime, copies, color)
             } catch (e: Exception) {
@@ -587,6 +618,32 @@ fun PrintScreen(m: Modifier, prefs: PrinterPrefs, ip: String, shared: Uri?, clea
         if (uri != null) go(uri)
     }
 
+    /** Ouvre le fichier (préparé : format, brouillon, pages par feuille) dans l'appli Canon PRINT. */
+    fun toCanonPrint(uri: Uri) {
+        val mime = ctx.contentResolver.getType(uri) ?: "application/pdf"
+        scope.launch {
+            busy = true
+            msg = try {
+                val (u, m) = if (PrintPrep.needsPrep(mime, opts)) {
+                    val f = withContext(Dispatchers.IO) { PrintPrep.prepare(ctx, uri, mime, opts) }.first
+                    androidx.core.content.FileProvider.getUriForFile(ctx, "be.canonhub.files", f) to "application/pdf"
+                } else uri to mime
+                val i = Intent(Intent.ACTION_SEND).setType(m).putExtra(Intent.EXTRA_STREAM, u)
+                    .setPackage(CANON_PRINT).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                try {
+                    ctx.startActivity(i); "Ouvert dans Canon PRINT : type de papier et qualité s'y règlent et y restent mémorisés."
+                } catch (e: android.content.ActivityNotFoundException) {
+                    ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=$CANON_PRINT")))
+                    "Canon PRINT n'est pas installée : page du Play Store ouverte."
+                }
+            } catch (e: Exception) { "Échec : ${e.message}" }
+            busy = false
+        }
+    }
+    val canonPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) toCanonPrint(uri)
+    }
+
     // Planche photos : format de case en cm (largeur × hauteur, portrait).
     val sheetSizes = listOf("Identité 3,5×4,5" to (3.5f to 4.5f), "5×5" to (5f to 5f), "6×9" to (6f to 9f), "9×13" to (8.9f to 12.7f), "10×15" to (10.2f to 15.2f))
     var sheet by remember { mutableIntStateOf(0) }
@@ -615,13 +672,17 @@ fun PrintScreen(m: Modifier, prefs: PrinterPrefs, ip: String, shared: Uri?, clea
             Section("Fichier reçu", Icons.Filled.Folder, sub = u.lastPathSegment ?: u.toString()) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(enabled = !busy, modifier = Modifier.weight(1f), onClick = { go(u) }) { Text("Imprimer") }
+                    OutlinedButton(enabled = !busy, modifier = Modifier.weight(1f), onClick = { toCanonPrint(u) }) { Text("Canon PRINT") }
                     OutlinedButton(modifier = Modifier.weight(1f), onClick = clearShared) { Text("Ignorer") }
                 }
             }
         }
         Section("Document", Icons.Filled.Print, sub = "PDF ou image depuis le téléphone") {
             Button(enabled = !busy, onClick = { picker.launch(arrayOf("application/pdf", "image/*")) }, modifier = Modifier.fillMaxWidth()) {
-                Text("Choisir un fichier")
+                Text(if (gpOn) "Choisir un fichier (pilote intégré)" else "Choisir un fichier")
+            }
+            OutlinedButton(enabled = !busy, onClick = { canonPicker.launch(arrayOf("application/pdf", "image/*")) }, modifier = Modifier.fillMaxWidth()) {
+                Text("Ouvrir dans Canon PRINT")
             }
             verso?.let { v ->
                 Button(
@@ -642,8 +703,10 @@ fun PrintScreen(m: Modifier, prefs: PrinterPrefs, ip: String, shared: Uri?, clea
             Hint("Astuce : depuis Galerie ou Fichiers, « Partager » puis « Imprimer avec la Canon ».")
         }
         Section("Réglages d'impression", Icons.Filled.Settings, sub = "${opts.paper.label} · ${opts.quality.label} · ${if (opts.color) "Couleur" else "N&B"}") {
-            OptChips("Format", Paper.entries, opts.paper, { it.label }) { setOpts(opts.copy(paper = it)) }
-            OptChips("Type de papier", MediaType.entries, opts.type, { it.label }) { setOpts(opts.copy(type = it)) }
+            if (!gpOn) {
+                OptChips("Format", Paper.entries, opts.paper, { it.label }) { setOpts(opts.copy(paper = it)) }
+                OptChips("Type de papier", MediaType.entries, opts.type, { it.label }) { setOpts(opts.copy(type = it)) }
+            }
             OptChips("Qualité", Quality.entries, opts.quality, { it.label }) { setOpts(opts.copy(quality = it)) }
             if (opts.quality == Quality.Draft) Hint("Brouillon : couleurs éclaircies avant l'envoi, environ 40 % d'encre en moins.")
             OptChips("Orientation", Orient.entries, opts.orient, { it.label }) { setOpts(opts.copy(orient = it)) }
@@ -651,7 +714,28 @@ fun PrintScreen(m: Modifier, prefs: PrinterPrefs, ip: String, shared: Uri?, clea
             ColorChips(opts.color) { setOpts(opts.copy(color = it)) }
             Toggle("Sans bordure", opts.borderless) { setOpts(opts.copy(borderless = it)) }
             Toggle("Remplir la page (photo recadrée)", opts.fill) { setOpts(opts.copy(fill = it)) }
-            Hint("Format, orientation et couleur sont transmis. Type de papier et qualité se confirment dans la fenêtre Canon : Android ne les transmet pas.")
+            Hint(if (gpOn) "Qualité de l'appli = finesse du rendu (brouillon : moins d'encre). Les réglages de l'imprimante sont dans « Pilote intégré »."
+                else "Format, orientation et couleur sont transmis. Type de papier et qualité se confirment dans la fenêtre Canon (Plus d'options), qui les mémorise ; ou utilisez « Ouvrir dans Canon PRINT ».")
+        }
+        Section("Pilote intégré (expérimental)", Icons.Filled.Print, sub = if (Gutenprint.available) "Gutenprint · sans service Canon" else "Absent de cette version") {
+            if (!Gutenprint.available) {
+                Hint("Le pilote Gutenprint n'a pas été compilé dans cet APK (étape CI « Gutenprint »).")
+            } else {
+                Toggle("Imprimer avec le pilote intégré", gpOn) { gpOn = it; prefs.gpEnabled = it }
+                if (gpOn) {
+                    if (gpErr.isNotEmpty()) Text(gpErr, color = MaterialTheme.colorScheme.error)
+                    Gutenprint.PARAMS.forEach { (p, label) ->
+                        val list = gpChoices[p].orEmpty()
+                        if (list.isNotEmpty()) {
+                            val cur = gpSel[p]?.takeIf { v -> list.any { it.name == v } } ?: (list.firstOrNull { it.default } ?: list.first()).name
+                            OptChips(label, list.map { it.name }, cur, { n -> list.first { it.name == n }.text }) {
+                                gpSel = gpSel + (p to it); prefs.gpSel = gpSel
+                            }
+                        }
+                    }
+                    Hint("Type de papier, qualité et sans bordure sont envoyés directement à l'imprimante (BJNP). Pilote libre Gutenprint, G3000 expérimentale : faites un essai sur papier ordinaire.")
+                }
+            }
         }
         Section("Planche photos", Icons.Filled.Face, sub = "Une photo répétée sur une feuille A4") {
             Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {

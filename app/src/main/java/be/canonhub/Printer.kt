@@ -43,6 +43,13 @@ class PrinterPrefs(ctx: Context) {
 
     fun removeProfile(ip: String) { profiles = profiles.filter { it.ip != ip } }
 
+    /** Pilote intégré Gutenprint : activé, et réglages « Param=valeur;… ». */
+    var gpEnabled: Boolean
+        get() = sp.getBoolean("gpOn", false)
+        set(v) = sp.edit().putBoolean("gpOn", v).apply()
+    var gpSel: Map<String, String>
+        get() = (sp.getString("gpSel", "") ?: "").split(';').filter { '=' in it }.associate { it.substringBefore('=') to it.substringAfter('=') }
+        set(v) = sp.edit().putString("gpSel", v.entries.joinToString(";") { "${it.key}=${it.value}" }).apply()
     var printOpts: String
         get() = sp.getString("printOpts", "") ?: ""
         set(v) = sp.edit().putString("printOpts", v).apply()

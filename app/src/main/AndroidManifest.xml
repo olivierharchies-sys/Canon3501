@@ -11,6 +11,10 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <!-- usesCleartextTraffic : l'imprimante est jointe en HTTP sur le réseau local. -->
+    <queries>
+        <package android:name="jp.co.canon.bsd.ad.pixmaprint" />
+    </queries>
+
     <application
         android:allowBackup="true"
         android:largeHeap="true"
@@ -43,6 +47,16 @@
                 <data android:mimeType="application/pdf" />
             </intent-filter>
         </activity>
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="be.canonhub.files"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
 
         <receiver
             android:name=".InkWidget"

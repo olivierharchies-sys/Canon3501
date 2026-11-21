@@ -12,8 +12,15 @@ android {
         applicationId = "be.canonhub"
         minSdk = 29
         targetSdk = 35
-        versionCode = 37
-        versionName = "1.16.1"
+        versionCode = 38
+        versionName = "1.17"
+        ndk { abiFilters += "arm64-v8a" }
+    }
+
+    // Pilote Gutenprint (C) : compilé seulement si la CI a préparé app/src/main/cpp/gp.
+    if (file("src/main/cpp/gp/lib/libgutenprint.a").exists()) {
+        externalNativeBuild { cmake { path = file("src/main/cpp/CMakeLists.txt") } }
+        System.getenv("ANDROID_NDK_LATEST_HOME")?.let { ndkPath = it }
     }
 
     signingConfigs {

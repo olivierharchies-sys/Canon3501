@@ -1,0 +1,7 @@
+# Produits par la CI (pilote Gutenprint)
+app/src/main/cpp/gp/
+app/src/main/assets/gutenprint-data.zip
+.gradle/
+build/
+app/build/
+app/.cxx/
