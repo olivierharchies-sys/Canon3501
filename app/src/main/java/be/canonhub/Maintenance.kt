@@ -19,11 +19,11 @@ import java.nio.ByteBuffer
 enum class Tool(val label: String, val bjl: String, val desc: String, val heavy: Boolean = false) {
     NozzleCheck("Test des buses", "@TestPrint=NozzleCheck",
         "Imprime le motif officiel de vérification des buses. Chargez du papier A4."),
-    CleanAll("Nettoyage des têtes", "@Cleaning=All",
+    CleanAll("Nettoyage des têtes", "@Cleaning=1ALL",
         "Nettoyage standard de toutes les couleurs. Refaites ensuite un test des buses."),
-    CleanBlack("Nettoyage noir", "@Cleaning=Black", "Nettoyage limité à la tête noire."),
-    CleanColor("Nettoyage couleur", "@Cleaning=Color", "Nettoyage limité à la tête couleur."),
-    DeepClean("Nettoyage en profondeur", "@DeepCleaning=All",
+    CleanBlack("Nettoyage noir", "@Cleaning=1BK", "Nettoyage limité à la tête noire."),
+    CleanColor("Nettoyage couleur", "@Cleaning=1CL", "Nettoyage limité à la tête couleur."),
+    DeepClean("Nettoyage en profondeur", "@DeepCleaning=1ALL",
         "Uniquement après deux nettoyages normaux sans effet. Consomme beaucoup d'encre.", heavy = true),
     Alignment("Alignement des têtes", "@TestPrint=HeadAlignment",
         "Imprime la feuille d'alignement. Chargez du papier A4."),
@@ -55,7 +55,7 @@ object CanonTools {
     /** Envoie la commande ; renvoie le transport qui l'a acceptée. */
     suspend fun run(ip: String, t: Tool, mode: Transport): String = withContext(Dispatchers.IO) {
         val data = payload(t)
-        val order = if (mode == Transport.Auto) listOf(Transport.Lpd, Transport.Bjnp, Transport.Raw, Transport.Ipp) else listOf(mode)
+        val order = if (mode == Transport.Auto) listOf(Transport.Bjnp, Transport.Lpd, Transport.Raw, Transport.Ipp) else listOf(mode)
         val errors = mutableListOf<String>()
         for (tr in order) {
             try {
@@ -132,21 +132,36 @@ object Bjnp {
         if (k.isEmpty() || v.isEmpty()) null else k to v
     }
 
+    /** Comme Pixma.Link : numéros de message dès 0, connexion TCP en 3 essais, accusé de réception vérifié. */
     fun send(ip: String, data: ByteArray) {
+        var seq = 0
         val details = ByteArray(8) + field("android", 64) + field("canonhub", 64) + field("Maintenance", 256)
-        val r = udp(ip, JOB_DETAILS, 1, 0, details)
+        val r = udp(ip, JOB_DETAILS, seq, 0, details)
         if (r.size < 16 || String(r, 0, 4) != "BJNP") throw IOException("réponse BJNP invalide")
-        if (u16(r, 6) != 0) throw IOException("imprimante occupée (code ${u16(r, 6)})")
         val session = u16(r, 10)
         try {
-            Socket().use { s ->
-                s.connect(InetSocketAddress(ip, PORT), 2500)
-                s.soTimeout = 4000
-                s.getOutputStream().apply { write(header(TCP_PRINT, 2, session, data.size) + data); flush() }
-                runCatching { s.getInputStream().read(ByteArray(64)) }
+            var s = Socket()
+            var err: Exception? = null
+            for (i in 0 until 3) {
+                try { s.connect(InetSocketAddress(ip, PORT), 3000); err = null; break } catch (e: Exception) {
+                    err = e; s.close(); s = Socket(); Thread.sleep(500)
+                }
+            }
+            if (err != null) throw IOException("TCP $PORT fermé : ${err.message}")
+            s.use {
+                it.soTimeout = 8000
+                it.tcpNoDelay = true
+                val o = it.getOutputStream()
+                val i = java.io.DataInputStream(it.getInputStream())
+                o.write(header(TCP_PRINT, ++seq, session, data.size) + data); o.flush()
+                val h = ByteArray(16).also { b -> i.readFully(b) }
+                if (String(h, 0, 4) != "BJNP" || (h[5].toInt() and 0xFF) != TCP_PRINT) throw IOException("accusé BJNP invalide")
+                val n = ByteBuffer.wrap(h, 12, 4).int
+                val ack = ByteArray(n).also { b -> i.readFully(b) }
+                if (n != 4 || ByteBuffer.wrap(ack).int != data.size) throw IOException("envoi BJNP non confirmé")
             }
         } finally {
-            runCatching { udp(ip, CLOSE, 3, session, ByteArray(0)) }
+            runCatching { udp(ip, CLOSE, ++seq, session, ByteArray(0)) }
         }
     }
 }
