@@ -336,10 +336,24 @@ object Rui {
 
     private fun needLogin(x: String) = "SES_ERR_URL" in x || tag(x, "RESULT") == "LOCKED"
 
-    private fun findSbid(page: String): String =
-        Regex("""id=["']SBID["'][^>]*value=["']([^"']*)""").find(page)?.groupValues?.get(1)
-            ?: Regex("""value=["']([^"']*)["'][^>]*id=["']SBID""").find(page)?.groupValues?.get(1)
-            ?: Regex("""SBID["']?\s*[:=]\s*["']([^"']+)""").find(page)?.groupValues?.get(1) ?: ""
+    /** Champ caché SBID, guillemets facultatifs (le HTML brut peut différer de ce qu'affiche le navigateur). */
+    private fun findSbid(page: String): String {
+        val i = page.indexOf("SBID")
+        if (i < 0) return ""
+        val tagStart = page.lastIndexOf('<', i).coerceAtLeast(0)
+        val tagEnd = page.indexOf('>', i).let { if (it < 0) page.length else it }
+        val tagTxt = page.substring(tagStart, tagEnd)
+        return Regex("""value\s*=\s*["']?([0-9A-Za-z]+)""").find(tagTxt)?.groupValues?.get(1)
+            ?: Regex("""SBID["']?\s*[:=,]\s*["']([0-9A-Za-z]{16,})""").find(page)?.groupValues?.get(1) ?: ""
+    }
+
+    /** Aperçu de diagnostic : contexte autour de SBID, ou début de page. */
+    private fun peek(page: String): String {
+        val i = page.indexOf("SBID")
+        val raw = if (i >= 0) page.substring((i - 60).coerceAtLeast(0), (i + 90).coerceAtMost(page.length))
+        else "${page.length} car., ${if ("logon" in page) "renvoie vers logon" else page.take(120)}"
+        return raw.replace(Regex("\\s+"), " ")
+    }
 
     /** Page suivante : en-tête Location ou balise meta refresh. */
     private fun next(page: String): String? {
@@ -365,13 +379,13 @@ object Rui {
             trace += "$n $lastCode"
             sbid = findSbid(page)
         }
-        for (p in listOf("index.html", "utility.html")) {
-            if (sbid.isNotEmpty()) break
-            page = runCatching { req(ip, p, null) }.getOrDefault("")
-            trace += "$p $lastCode"
+        if (sbid.isEmpty()) {
+            page = runCatching { req(ip, "index.html", null) }.getOrDefault("")
+            trace += "index.html $lastCode"
             sbid = findSbid(page)
         }
-        loginInfo = trace.joinToString(" → ") + " · cookies ${cookies.keys} · SBID " + (if (sbid.isEmpty()) "absent" else "ok")
+        loginInfo = trace.joinToString(" → ") + " · cookies ${cookies.keys} · SBID " +
+            (if (sbid.isEmpty()) "absent · index : ${peek(page)}" else "ok")
     }
 
     /** Lance l'outil ; renvoie le numéro de travail. */

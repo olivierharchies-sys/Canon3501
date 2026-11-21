@@ -12,8 +12,8 @@ android {
         applicationId = "be.canonhub"
         minSdk = 29
         targetSdk = 35
-        versionCode = 30
-        versionName = "1.13.3"
+        versionCode = 31
+        versionName = "1.13.4"
     }
 
     signingConfigs {
