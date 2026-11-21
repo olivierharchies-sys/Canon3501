@@ -260,24 +260,28 @@ object Images {
     }
 
     fun savePdf(ctx: Context, write: (java.io.OutputStream) -> Unit): Uri? = runCatching {
+        val name = "${stamp()}.pdf"
         val cv = ContentValues().apply {
-            put(MediaStore.Downloads.DISPLAY_NAME, "${stamp()}.pdf")
+            put(MediaStore.Downloads.DISPLAY_NAME, name)
             put(MediaStore.Downloads.MIME_TYPE, "application/pdf")
             put(MediaStore.Downloads.RELATIVE_PATH, "Download/Canon")
         }
         val uri = ctx.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, cv)!!
         ctx.contentResolver.openOutputStream(uri)!!.use(write)
+        Export.copy(ctx, uri, name, "application/pdf")
         uri
     }.getOrNull()
 
     fun saveJpeg(ctx: Context, data: ByteArray): Uri? = runCatching {
+        val name = "${stamp()}.jpg"
         val cv = ContentValues().apply {
-            put(MediaStore.Images.Media.DISPLAY_NAME, "${stamp()}.jpg")
+            put(MediaStore.Images.Media.DISPLAY_NAME, name)
             put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
             put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/Canon")
         }
         val uri = ctx.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv)!!
         ctx.contentResolver.openOutputStream(uri)!!.use { it.write(data) }
+        Export.copy(ctx, uri, name, "image/jpeg")
         uri
     }.getOrNull()
 
@@ -291,6 +295,90 @@ object Images {
         c.drawBitmap(front, null, RectF(x, 300f, x + Area.Card.w, 300f + Area.Card.h), p)
         c.drawBitmap(back, null, RectF(x, 1300f, x + Area.Card.w, 1300f + Area.Card.h), p)
         return out
+    }
+
+    /** Planche A4 (300 dpi) remplie de copies de la photo au format w×h cm, traits de coupe gris. */
+    fun photoSheet(src: Bitmap, wCm: Float, hCm: Float): Bitmap {
+        val px = 300f / 2.54f
+        val pw = 2481; val ph = 3508
+        val margin = 0.5f * px; val gap = 0.2f * px
+        // Orientation de la case selon la photo.
+        val land = src.width > src.height
+        val cw = (if (land) maxOf(wCm, hCm) else minOf(wCm, hCm)) * px
+        val ch = (if (land) minOf(wCm, hCm) else maxOf(wCm, hCm)) * px
+        val cols = ((pw - 2 * margin + gap) / (cw + gap)).toInt().coerceAtLeast(1)
+        val rows = ((ph - 2 * margin + gap) / (ch + gap)).toInt().coerceAtLeast(1)
+        // Recadrage centré aux proportions de la case.
+        val r = cw / ch
+        val sr = src.width.toFloat() / src.height
+        val crop = if (sr > r) {
+            val w = (src.height * r).toInt(); Rect((src.width - w) / 2, 0, (src.width + w) / 2, src.height)
+        } else {
+            val h = (src.width / r).toInt(); Rect(0, (src.height - h) / 2, src.width, (src.height + h) / 2)
+        }
+        val out = Bitmap.createBitmap(pw, ph, Bitmap.Config.ARGB_8888)
+        val c = Canvas(out)
+        c.drawColor(AColor.WHITE)
+        val p = Paint(Paint.FILTER_BITMAP_FLAG)
+        val line = Paint().apply { color = AColor.LTGRAY; strokeWidth = 2f }
+        for (j in 0 until rows) for (i in 0 until cols) {
+            val x = margin + i * (cw + gap); val y = margin + j * (ch + gap)
+            c.drawBitmap(src, crop, RectF(x, y, x + cw, y + ch), p)
+            c.drawRect(x, y, x + cw, y + ch, line.apply { style = Paint.Style.STROKE })
+        }
+        return out
+    }
+
+    /** Sépare plusieurs photos posées sur la vitre ; liste vide si moins de deux trouvées. */
+    fun splitPhotos(src: Bitmap): List<Bitmap> {
+        val sw = 400
+        val k = src.width.toFloat() / sw
+        val sh = (src.height / k).toInt().coerceAtLeast(1)
+        val small = Bitmap.createScaledBitmap(src, sw, sh, true)
+        val px = IntArray(sw * sh)
+        small.getPixels(px, 0, sw, 0, 0, sw, sh)
+        val ink = BooleanArray(px.size) { i ->
+            val c = px[i]
+            val r = AColor.red(c); val g = AColor.green(c); val b = AColor.blue(c)
+            (r + g + b) / 3 < 230 || maxOf(r, g, b) - minOf(r, g, b) > 30
+        }
+        // Dilatation : relie les zones claires d'une même photo.
+        val mask = BooleanArray(px.size)
+        for (y in 0 until sh) for (x in 0 until sw) if (ink[y * sw + x]) {
+            for (dy in -3..3) for (dx in -3..3) {
+                val yy = y + dy; val xx = x + dx
+                if (yy in 0 until sh && xx in 0 until sw) mask[yy * sw + xx] = true
+            }
+        }
+        val seen = BooleanArray(px.size)
+        val boxes = ArrayList<Rect>()
+        val stack = IntArray(px.size)
+        for (start in px.indices) {
+            if (!mask[start] || seen[start]) continue
+            var top = 0; stack[top++] = start; seen[start] = true
+            var l = sw; var t = sh; var r = -1; var b = -1; var n = 0
+            while (top > 0) {
+                val i = stack[--top]; n++
+                val x = i % sw; val y = i / sw
+                if (x < l) l = x; if (x > r) r = x; if (y < t) t = y; if (y > b) b = y
+                if (x > 0 && mask[i - 1] && !seen[i - 1]) { seen[i - 1] = true; stack[top++] = i - 1 }
+                if (x < sw - 1 && mask[i + 1] && !seen[i + 1]) { seen[i + 1] = true; stack[top++] = i + 1 }
+                if (y > 0 && mask[i - sw] && !seen[i - sw]) { seen[i - sw] = true; stack[top++] = i - sw }
+                if (y < sh - 1 && mask[i + sw] && !seen[i + sw]) { seen[i + sw] = true; stack[top++] = i + sw }
+            }
+            val bw = r - l + 1; val bh = b - t + 1
+            if (bw >= 20 && bh >= 20 && n >= px.size / 100) boxes += Rect(l + 3, t + 3, r - 2, b - 2)
+        }
+        if (boxes.size < 2) return emptyList()
+        boxes.sortWith(compareBy<Rect>({ it.top / 20 }, { it.left }))
+        return boxes.mapNotNull { bx ->
+            val rr = Rect(
+                (bx.left * k).toInt().coerceIn(0, src.width - 1), (bx.top * k).toInt().coerceIn(0, src.height - 1),
+                (bx.right * k).toInt().coerceIn(1, src.width), (bx.bottom * k).toInt().coerceIn(1, src.height),
+            )
+            if (rr.width() <= 0 || rr.height() <= 0) null
+            else Bitmap.createBitmap(src, rr.left, rr.top, rr.width(), rr.height())
+        }
     }
 
     /** Nombre de pages d'un PDF. */
@@ -327,4 +415,35 @@ object Images {
             }
         }
     }
+}
+
+/** Copie automatique des documents enregistrés vers un dossier choisi (Réglages). */
+object Export {
+    fun copy(ctx: Context, src: Uri, name: String, mime: String) {
+        val t = PrinterPrefs(ctx).exportTree
+        if (t.isBlank()) return
+        runCatching {
+            val tree = Uri.parse(t)
+            val parent = android.provider.DocumentsContract.buildDocumentUriUsingTree(
+                tree, android.provider.DocumentsContract.getTreeDocumentId(tree),
+            )
+            val dst = android.provider.DocumentsContract.createDocument(ctx.contentResolver, parent, mime, name) ?: return
+            ctx.contentResolver.openInputStream(src)!!.use { i -> ctx.contentResolver.openOutputStream(dst)!!.use { o -> i.copyTo(o) } }
+        }
+    }
+
+    /** Nom lisible du dossier : « primary:Documents/Scans » → « Documents/Scans ». */
+    fun label(tree: String): String = runCatching {
+        android.provider.DocumentsContract.getTreeDocumentId(Uri.parse(tree)).substringAfter(':').ifBlank { "Stockage" }
+    }.getOrDefault(tree)
+}
+
+/** Texte OCR des PDF cherchables, indexé par URI, pour la recherche dans Documents. */
+object OcrIndex {
+    private fun sp(ctx: Context) = ctx.getSharedPreferences("ocr", Context.MODE_PRIVATE)
+    fun put(ctx: Context, uri: Uri, text: String) {
+        if (text.isNotBlank()) sp(ctx).edit().putString(uri.toString(), text).apply()
+    }
+    fun get(ctx: Context, uri: Uri): String = sp(ctx).getString(uri.toString(), "") ?: ""
+    fun remove(ctx: Context, uri: Uri) = sp(ctx).edit().remove(uri.toString()).apply()
 }

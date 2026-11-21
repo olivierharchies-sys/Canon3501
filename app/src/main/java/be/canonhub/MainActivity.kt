@@ -42,6 +42,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Face
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DocumentScanner
@@ -278,8 +279,7 @@ fun StatusCard(
     ) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             if (ip.isBlank()) {
-                Text("Aucune imprimante configurée", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                Button(onClick = onSettings) { Text("Configurer") }
+                FirstRun(setIp, onSettings)
                 return@Column
             }
             Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
@@ -322,6 +322,41 @@ fun StatusCard(
                 }
             }
         }
+    }
+}
+
+/** Premier démarrage : recherche automatique de l'imprimante sur le Wi-Fi, sinon saisie manuelle. */
+@Composable
+fun FirstRun(setIp: (String) -> Unit, onSettings: () -> Unit) {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var busy by remember { mutableStateOf(false) }
+    var found by remember { mutableStateOf<List<Discovery.Found>?>(null) }
+    suspend fun search() {
+        busy = true
+        found = runCatching { Discovery.search(ctx, 6) }.getOrDefault(emptyList())
+            .sortedByDescending { it.name.contains("Canon", true) }
+        busy = false
+    }
+    LaunchedEffect(Unit) { search() }
+    Text("Bienvenue", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+    Hint("1. Allumez l'imprimante.  2. Téléphone sur le même Wi-Fi.  3. Choisissez-la ci-dessous.")
+    if (busy) {
+        LinearProgressIndicator(Modifier.fillMaxWidth())
+        Hint("Recherche sur le Wi-Fi…")
+    }
+    found?.forEach { f ->
+        OutlinedButton(modifier = Modifier.fillMaxWidth(), onClick = {
+            val p = PrinterPrefs(ctx)
+            p.addProfile(f.name, f.ip)
+            p.applyHints(f)
+            setIp(f.ip)
+        }) { Text("${f.name} · ${f.ip}") }
+    }
+    if (found?.isEmpty() == true && !busy) Hint("Aucune imprimante trouvée.")
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        OutlinedButton(enabled = !busy, onClick = { scope.launch { search() } }) { Text("Relancer") }
+        Button(onClick = onSettings) { Text("Saisir l'adresse") }
     }
 }
 
@@ -396,7 +431,11 @@ fun NeedIp(m: Modifier, onSettings: () -> Unit) {
 
 // ---------- Outils communs ----------
 
-fun markPrint(ctx: Context) { PrinterPrefs(ctx).lastPrint = System.currentTimeMillis() }
+fun markPrint(ctx: Context) {
+    val p = PrinterPrefs(ctx)
+    p.lastPrint = System.currentTimeMillis()
+    p.bump("prints")
+}
 
 /** Impression par la fenêtre Android (service Canon / Mopria). */
 fun androidPrint(ctx: Context, uri: Uri, mime: String) {
@@ -525,6 +564,29 @@ fun PrintScreen(m: Modifier, prefs: PrinterPrefs, ip: String, shared: Uri?, clea
         if (uri != null) go(uri)
     }
 
+    // Planche photos : format de case en cm (largeur × hauteur, portrait).
+    val sheetSizes = listOf("Identité 3,5×4,5" to (3.5f to 4.5f), "5×5" to (5f to 5f), "6×9" to (6f to 9f), "9×13" to (8.9f to 12.7f), "10×15" to (10.2f to 15.2f))
+    var sheet by remember { mutableIntStateOf(0) }
+    val photoPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            busy = true
+            msg = try {
+                val (w, h) = sheetSizes[sheet].second
+                val bmp = withContext(Dispatchers.IO) {
+                    val raw = ctx.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: throw IOException("fichier illisible")
+                    val b = Images.decode(raw, 3000) ?: throw IOException("image illisible")
+                    Images.photoSheet(b, w, h)
+                }
+                printBitmap(ctx, "planche", bmp)
+                "Planche prête. Au premier essai, mesurez une photo à la règle."
+            } catch (e: Exception) {
+                "Échec : ${e.message}"
+            }
+            busy = false
+        }
+    }
+
     Column(m.padding(16.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         shared?.let { u ->
             Section("Fichier reçu", Icons.Filled.Folder, sub = u.lastPathSegment ?: u.toString()) {
@@ -555,6 +617,17 @@ fun PrintScreen(m: Modifier, prefs: PrinterPrefs, ip: String, shared: Uri?, clea
             if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
             if (msg.isNotEmpty()) Text(msg, style = MaterialTheme.typography.bodyMedium)
             Hint("Astuce : depuis Galerie ou Fichiers, « Partager » puis « Imprimer avec la Canon ».")
+        }
+        Section("Planche photos", Icons.Filled.Face, sub = "Une photo répétée sur une feuille A4") {
+            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                sheetSizes.forEachIndexed { i, (label, _) ->
+                    FilterChip(selected = sheet == i, onClick = { sheet = i }, label = { Text(label) })
+                }
+            }
+            OutlinedButton(enabled = !busy, modifier = Modifier.fillMaxWidth(), onClick = { photoPicker.launch(arrayOf("image/*")) }) {
+                Text("Choisir la photo")
+            }
+            Hint("Photo recadrée au centre, traits de coupe gris. Papier photo A4 conseillé.")
         }
         Section("Mode d'envoi", Icons.Filled.Settings) {
             Toggle("Impression directe (IPP, sans fenêtre Android)", direct) { direct = it; prefs.directPrint = it }
@@ -634,6 +707,7 @@ fun ScanScreen(m: Modifier, ip: String) {
     var ocrText by remember { mutableStateOf<String?>(null) }
     var out by remember { mutableStateOf(OutFmt()) }
     var detected by remember { mutableStateOf<String?>(null) }
+    var askInterleave by remember { mutableStateOf(false) }
     val target = out.target()
     val cur = pages.getOrNull(sel.coerceIn(0, (pages.size - 1).coerceAtLeast(0)))
 
@@ -686,6 +760,7 @@ fun ScanScreen(m: Modifier, ip: String) {
                 b to runCatching { Ocr.read(b) }.getOrNull()
             }
             Images.savePdf(ctx) { o -> Ocr.searchablePdf(done, target, o) }
+                ?.also { OcrIndex.put(ctx, it, done.mapNotNull { d -> d.second?.text }.joinToString("\n")) }
         } else if (target != null) {
             val bm = pages.mapNotNull { full(it) }
             Images.savePdf(ctx) { o -> Formats.pdf(bm, target, o) }
@@ -707,6 +782,7 @@ fun ScanScreen(m: Modifier, ip: String) {
                     val b = Escl.scan(ip, dpi, color, area) { progress = it }
                     pages = pages + Page(b, dpi)
                     sel = pages.size - 1
+                    PrinterPrefs(ctx).bump("scans")
                     "${pages.size} page(s) numérisée(s)."
                 }
             },
@@ -769,6 +845,31 @@ fun ScanScreen(m: Modifier, ip: String) {
                     }) { Icon(Icons.Filled.Delete, "Supprimer la page") }
                     androidx.compose.foundation.layout.Spacer(Modifier.weight(1f))
                     androidx.compose.material3.TextButton(enabled = !busy, onClick = { pages = emptyList(); sel = 0; msg = "" }) { Text("Tout effacer") }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(enabled = !busy, modifier = Modifier.weight(1f), onClick = {
+                        work("Recherche des photos…") {
+                            val p = pages[sel]
+                            val parts = withContext(Dispatchers.Default) {
+                                val o = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                                android.graphics.BitmapFactory.decodeByteArray(p.bytes, 0, p.bytes.size, o)
+                                val b = Images.decode(p.bytes, 4000)?.let { Images.rotate(it, p.rot) } ?: throw IOException("image illisible")
+                                val origW = if (p.rot % 180 == 0) o.outWidth else o.outHeight
+                                val d = (p.dpi * b.width / origW.coerceAtLeast(1)).coerceAtLeast(1)
+                                Images.splitPhotos(b).map { Page(Images.jpeg(it, 92), d) }
+                            }
+                            if (parts.isEmpty()) "Moins de deux photos détectées : espacez-les d'au moins 1 cm."
+                            else {
+                                pages = pages.toMutableList().also { l -> l.removeAt(sel); l.addAll(sel, parts) }
+                                "${parts.size} photos séparées."
+                            }
+                        }
+                    }) { Text("Séparer les photos") }
+                    OutlinedButton(
+                        enabled = !busy && pages.size >= 2 && pages.size % 2 == 0,
+                        modifier = Modifier.weight(1f),
+                        onClick = { askInterleave = true },
+                    ) { Text("Intercaler R/V") }
                 }
             }
             Section("Retouche", sub = "S'applique à toutes les pages") {
@@ -837,6 +938,19 @@ fun ScanScreen(m: Modifier, ip: String) {
                 }) { Text("Extraire le texte (OCR)") }
             }
         }
+        if (askInterleave) {
+            androidx.compose.material3.AlertDialog(
+                onDismissRequest = { askInterleave = false },
+                title = { Text("Intercaler recto/verso") },
+                text = { Text("Première moitié = rectos, seconde moitié = versos. Les versos ont-ils été numérisés dans l'ordre inverse (pile retournée) ?") },
+                confirmButton = {
+                    androidx.compose.material3.TextButton(onClick = { pages = interleave(pages, true); sel = 0; askInterleave = false }) { Text("Ordre inverse") }
+                },
+                dismissButton = {
+                    androidx.compose.material3.TextButton(onClick = { pages = interleave(pages, false); sel = 0; askInterleave = false }) { Text("Même ordre") }
+                },
+            )
+        }
         ocrText?.let { t ->
             androidx.compose.material3.AlertDialog(
                 onDismissRequest = { ocrText = null },
@@ -863,6 +977,14 @@ fun ScanScreen(m: Modifier, ip: String) {
             )
         }
     }
+}
+
+/** Rectos (1re moitié) et versos (2e moitié) remis dans l'ordre r1, v1, r2, v2… */
+fun interleave(l: List<Page>, reverse: Boolean): List<Page> {
+    val h = l.size / 2
+    val r = l.take(h)
+    val v = l.drop(h).let { if (reverse) it.reversed() else it }
+    return r.indices.flatMap { listOf(r[it], v[it]) } + l.drop(2 * h)
 }
 
 /** Vignettes des pages numérisées ; la page choisie est encadrée. */
@@ -912,6 +1034,7 @@ fun CopyScreen(m: Modifier, prefs: PrinterPrefs, ip: String) {
 
     suspend fun output0(src: Bitmap): String {
         val bmp = withContext(Dispatchers.Default) { Images.applyFilter(src, filt) }
+        PrinterPrefs(ctx).bump("copies")
         return if (direct) {
             try {
                 val data = withContext(Dispatchers.Default) { Images.jpeg(bmp) }

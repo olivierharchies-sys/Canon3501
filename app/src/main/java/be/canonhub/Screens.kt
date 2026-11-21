@@ -429,6 +429,29 @@ fun InfoScreen(m: Modifier, ip: String) {
             Text("Compteur de pages non communiqué par l'imprimante.", style = MaterialTheme.typography.bodySmall)
         }
         OutlinedButton(onClick = { load() }, enabled = !loading) { Text("Actualiser") }
+        AppCounters()
+    }
+}
+
+/** Compteurs tenus par l'appli (l'imprimante ne donne pas les siens). */
+@Composable
+fun AppCounters() {
+    val ctx = LocalContext.current
+    val prefs = remember { PrinterPrefs(ctx) }
+    var tick by remember { mutableIntStateOf(0) }
+    val since = remember(tick) { java.text.SimpleDateFormat("dd/MM/yyyy", java.util.Locale.FRANCE).format(java.util.Date(prefs.countersSince)) }
+    Section(
+        "Compteurs de l'appli", Icons.Filled.Schedule, sub = "Depuis le $since",
+        trailing = { TextButton(onClick = { prefs.resetCounters(); tick++ }) { Text("Remettre à 0") } },
+    ) {
+        listOf("Pages numérisées" to "scans", "Impressions envoyées" to "prints", "Copies" to "copies").forEach { (label, k) ->
+            val n = remember(tick) { prefs.counter(k) }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(label, Modifier.weight(1f))
+                Text("$n", fontWeight = FontWeight.SemiBold)
+            }
+        }
+        Hint("Impressions : envois depuis l'appli (tests et entretien inclus), pas les pages réelles.")
     }
 }
 
@@ -449,6 +472,17 @@ fun SettingsScreen(m: Modifier, prefs: PrinterPrefs, ip: String, onSave: (String
     var threshold by remember { mutableIntStateOf(prefs.inkThreshold) }
     var clog by remember { mutableStateOf(prefs.clogReminder) }
     var clogDays by remember { mutableIntStateOf(prefs.clogDays) }
+    var tree by remember { mutableStateOf(prefs.exportTree) }
+    val treePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { u ->
+        if (u != null) {
+            runCatching {
+                ctx.contentResolver.takePersistableUriPermission(
+                    u, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+                )
+            }
+            prefs.exportTree = u.toString(); tree = u.toString()
+        }
+    }
 
     val notifPerm = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
         if (!ok) msg = "Notifications refusées : les alertes ne s'afficheront pas."
@@ -539,6 +573,23 @@ fun SettingsScreen(m: Modifier, prefs: PrinterPrefs, ip: String, onSave: (String
                     }
                     TextButton(onClick = { text = p.ip; onSave(p.ip) }) { Text("Utiliser") }
                     TextButton(onClick = { prefs.removeProfile(p.ip); profiles = prefs.profiles }) { Text("Suppr.") }
+                }
+            }
+        }
+
+        Section("Copie automatique", Icons.Filled.Bookmark, sub = if (tree.isBlank()) "Désactivée" else "Vers : ${Export.label(tree)}") {
+            Hint("Chaque PDF ou JPEG enregistré est aussi copié dans ce dossier (Drive, carte SD, dossier synchronisé…).")
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(modifier = Modifier.weight(1f), onClick = { treePicker.launch(null) }) { Text("Choisir le dossier") }
+                if (tree.isNotBlank()) {
+                    TextButton(onClick = {
+                        runCatching {
+                            ctx.contentResolver.releasePersistableUriPermission(
+                                Uri.parse(tree), Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+                            )
+                        }
+                        prefs.exportTree = ""; tree = ""
+                    }) { Text("Désactiver") }
                 }
             }
         }

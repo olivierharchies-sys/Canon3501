@@ -86,6 +86,22 @@ class PrinterPrefs(ctx: Context) {
         Escl.hint = esclHint.ifBlank { null }
     }
 
+    /** Dossier (arborescence SAF) où copier chaque document enregistré ; vide = aucun. */
+    var exportTree: String
+        get() = sp.getString("exportTree", "") ?: ""
+        set(v) = sp.edit().putString("exportTree", v).apply()
+
+    /** Compteurs de l'appli : scans, prints, copies. */
+    fun counter(k: String): Int = sp.getInt("n_$k", 0)
+    fun bump(k: String, n: Int = 1) = sp.edit().putInt("n_$k", counter(k) + n).apply()
+    var countersSince: Long
+        get() = sp.getLong("n_since", 0L).let { if (it == 0L) System.currentTimeMillis().also { t -> countersSince = t } else it }
+        set(v) = sp.edit().putLong("n_since", v).apply()
+    fun resetCounters() {
+        sp.edit().putInt("n_scans", 0).putInt("n_prints", 0).putInt("n_copies", 0).apply()
+        countersSince = System.currentTimeMillis()
+    }
+
     var askedNotif: Boolean
         get() = sp.getBoolean("askedNotif", false)
         set(v) = sp.edit().putBoolean("askedNotif", v).apply()

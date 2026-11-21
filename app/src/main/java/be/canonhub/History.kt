@@ -23,6 +23,7 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.PictureAsPdf
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ElevatedCard
@@ -102,10 +103,15 @@ fun HistoryScreen(m: Modifier) {
     var files by remember { mutableStateOf<List<Saved>?>(null) }
     var renaming by remember { mutableStateOf<Saved?>(null) }
     var deleting by remember { mutableStateOf<Saved?>(null) }
+    var query by remember { mutableStateOf("") }
     LaunchedEffect(reload) { files = withContext(Dispatchers.IO) { SavedFiles.list(ctx) } }
 
-    val list = files
-    if (list != null && list.isEmpty()) {
+    val all = files
+    val q = query.trim()
+    val list = if (q.isEmpty()) all else all?.filter { f ->
+        f.name.contains(q, true) || OcrIndex.get(ctx, f.uri).contains(q, true)
+    }
+    if (all != null && all.isEmpty()) {
         EmptyState(m, Icons.Filled.FolderOpen, "Aucun document", "Les scans et copies enregistrés apparaîtront ici.")
     } else {
         LazyColumn(
@@ -113,6 +119,16 @@ fun HistoryScreen(m: Modifier) {
             contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
+            item {
+                OutlinedTextField(
+                    query, { query = it }, Modifier.fillMaxWidth(), singleLine = true,
+                    label = { Text("Rechercher (nom ou texte des PDF cherchables)") },
+                    leadingIcon = { Icon(Icons.Filled.Search, null) },
+                )
+            }
+            if (list != null && list.isEmpty()) item {
+                Text("Aucun résultat.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
             items(list ?: emptyList(), key = { it.uri.toString() }) { f ->
                 ElevatedCard(onClick = { SavedFiles.open(ctx, f) }, modifier = Modifier.fillMaxWidth()) {
                     Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -154,7 +170,7 @@ fun HistoryScreen(m: Modifier) {
             title = { Text("Supprimer ?") },
             text = { Text(f.name) },
             confirmButton = {
-                TextButton(onClick = { SavedFiles.delete(ctx, f); deleting = null; reload++ }) { Text("Supprimer") }
+                TextButton(onClick = { SavedFiles.delete(ctx, f); OcrIndex.remove(ctx, f.uri); deleting = null; reload++ }) { Text("Supprimer") }
             },
             dismissButton = { TextButton(onClick = { deleting = null }) { Text("Annuler") } },
         )
