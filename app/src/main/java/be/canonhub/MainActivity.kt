@@ -59,6 +59,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
@@ -168,7 +169,7 @@ fun App(prefs: PrinterPrefs, incoming: Intent?, consumed: () -> Unit) {
                 Triple(Screen.Print, "Imprimer", Icons.Filled.Print),
                 Triple(Screen.History, "Documents", Icons.Filled.Folder),
             ).forEach { (sc, label, icon) ->
-                androidx.compose.material3.NavigationBarItem(
+                NavigationBarItem(
                     selected = screen == sc,
                     onClick = { screen = sc },
                     icon = { Icon(icon, null) },
