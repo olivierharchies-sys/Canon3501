@@ -79,7 +79,9 @@ object Gutenprint {
         init(ctx)
         nChoices(param, kv(sel, false)).map { line ->
             val def = line.startsWith("*")
-            val (n, t) = line.removePrefix("*").split('\t', limit = 2).let { it[0] to it.getOrElse(1) { it[0] } }
+            val parts = line.removePrefix("*").split('\t', limit = 2)
+            val n = parts[0]
+            val t = parts.getOrElse(1) { n }
             Choice(n, t, def)
         }
     }
