@@ -18,6 +18,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.background
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -176,7 +178,21 @@ fun App(prefs: PrinterPrefs, incoming: Intent?, consumed: () -> Unit) {
 
 // ---------- Accueil en tuiles ----------
 
-data class Tile(val label: String, val sub: String, val icon: ImageVector, val color: Color, val target: Screen)
+data class Tile(
+    val label: String, val sub: String, val icon: ImageVector, val color: Color, val target: Screen,
+    val needsIpp: Boolean = false,
+)
+
+/** État de l'imprimante affiché en tête de l'accueil. */
+data class HomeStatus(val online: Boolean, val model: String, val ipp: Boolean)
+
+suspend fun homeStatus(ip: String): HomeStatus = withContext(Dispatchers.IO) {
+    val online = portOpen(ip, 515, 1500) || portOpen(ip, 80, 1500)
+    val model = if (!online) "" else runCatching {
+        Bjnp.fields(Bjnp.deviceId(ip)).firstOrNull { it.first == "MDL" || it.first == "MODEL" }?.second
+    }.getOrNull().orEmpty()
+    HomeStatus(online, model, online && portOpen(ip, 631, 1000))
+}
 
 @Composable
 fun HomeScreen(m: Modifier, prefs: PrinterPrefs, ip: String, setIp: (String) -> Unit, go: (Screen) -> Unit) {
@@ -184,13 +200,18 @@ fun HomeScreen(m: Modifier, prefs: PrinterPrefs, ip: String, setIp: (String) -> 
         Tile("Imprimer", "PDF, photos, recto-verso", Icons.Filled.Print, Color(0xFF1E88E5), Screen.Print),
         Tile("Numériser", "Multipage, PDF", Icons.Filled.DocumentScanner, Color(0xFF43A047), Screen.Scan),
         Tile("Copier", "Copies, carte ID", Icons.Filled.ContentCopy, Color(0xFFF4511E), Screen.Copy),
-        Tile("Encre et état", "Niveaux, alertes", Icons.Filled.WaterDrop, Color(0xFF8E24AA), Screen.Ink),
         Tile("Entretien", "Nettoyage, buses", Icons.Filled.Build, Color(0xFF00897B), Screen.Maintenance),
-        Tile("File d'attente", "Tâches, annulation", Icons.Filled.HourglassEmpty, Color(0xFF6D4C41), Screen.Queue),
-        Tile("Infos", "Firmware, compteurs", Icons.Filled.Info, Color(0xFF3949AB), Screen.Info),
+        Tile("Encre et état", "Niveaux, alertes", Icons.Filled.WaterDrop, Color(0xFF8E24AA), Screen.Ink, needsIpp = true),
+        Tile("File d'attente", "Tâches, annulation", Icons.Filled.HourglassEmpty, Color(0xFF6D4C41), Screen.Queue, needsIpp = true),
+        Tile("Infos", "Firmware, compteurs", Icons.Filled.Info, Color(0xFF3949AB), Screen.Info, needsIpp = true),
         Tile("Réglages", "Imprimantes, alertes", Icons.Filled.Settings, Color(0xFF546E7A), Screen.Settings),
     )
     val profiles = remember { prefs.profiles }
+    var refresh by remember { mutableIntStateOf(0) }
+    val status by androidx.compose.runtime.produceState<HomeStatus?>(null, ip, refresh) {
+        value = null
+        value = if (ip.isBlank()) null else homeStatus(ip)
+    }
     LazyVerticalGrid(
         columns = GridCells.Fixed(2),
         modifier = m.fillMaxSize(),
@@ -199,36 +220,88 @@ fun HomeScreen(m: Modifier, prefs: PrinterPrefs, ip: String, setIp: (String) -> 
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         item(span = { GridItemSpan(maxLineSpan) }) {
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text(if (ip.isBlank()) "Aucune imprimante configurée (voir Réglages)" else "Imprimante : $ip")
-                if (profiles.size >= 2) {
-                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        profiles.forEach { p ->
-                            FilterChip(selected = p.ip == ip, onClick = { setIp(p.ip) }, label = { Text(p.name) })
-                        }
-                    }
-                }
-            }
+            StatusCard(ip, status, profiles, setIp, onRefresh = { refresh++ }, onSettings = { go(Screen.Settings) })
         }
-        items(tiles) { t -> TileCard(t) { go(t.target) } }
+        items(tiles) { t ->
+            val off = t.needsIpp && status?.let { !it.ipp } == true
+            TileCard(t, off) { go(t.target) }
+        }
     }
 }
 
 @Composable
-fun TileCard(t: Tile, onClick: () -> Unit) {
+fun StatusCard(
+    ip: String, status: HomeStatus?, profiles: List<Profile>, setIp: (String) -> Unit,
+    onRefresh: () -> Unit, onSettings: () -> Unit,
+) {
+    ElevatedCard(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (ip.isBlank()) {
+                Text("Aucune imprimante configurée", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                Button(onClick = onSettings) { Text("Configurer") }
+                return@Column
+            }
+            Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                val dot = when {
+                    status == null -> MaterialTheme.colorScheme.outline
+                    status.online -> Color(0xFF43A047)
+                    else -> MaterialTheme.colorScheme.error
+                }
+                androidx.compose.foundation.layout.Box(
+                    Modifier.size(12.dp).background(dot, androidx.compose.foundation.shape.CircleShape)
+                )
+                Column(Modifier.padding(start = 12.dp).weight(1f)) {
+                    Text(
+                        status?.model?.takeIf { it.isNotBlank() } ?: "Imprimante",
+                        style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold,
+                    )
+                    Text(
+                        "$ip · " + when {
+                            status == null -> "vérification…"
+                            status.online -> "en ligne"
+                            else -> "hors ligne"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                IconButton(onClick = onRefresh) { Icon(Icons.Filled.Refresh, "Actualiser") }
+            }
+            if (profiles.size >= 2) {
+                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    profiles.forEach { p ->
+                        FilterChip(selected = p.ip == ip, onClick = { setIp(p.ip) }, label = { Text(p.name) })
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun TileCard(t: Tile, off: Boolean, onClick: () -> Unit) {
+    val bg = if (off) MaterialTheme.colorScheme.surfaceVariant else t.color
+    val fg = if (off) MaterialTheme.colorScheme.onSurfaceVariant else Color.White
     Card(
         onClick = onClick,
-        colors = CardDefaults.cardColors(containerColor = t.color),
-        modifier = Modifier.fillMaxWidth().aspectRatio(1f),
+        shape = androidx.compose.foundation.shape.RoundedCornerShape(24.dp),
+        colors = CardDefaults.cardColors(containerColor = bg),
+        modifier = Modifier.fillMaxWidth().aspectRatio(1.1f),
     ) {
         Column(
             Modifier.fillMaxSize().padding(16.dp),
             verticalArrangement = Arrangement.SpaceBetween,
         ) {
-            Icon(t.icon, null, tint = Color.White, modifier = Modifier.size(40.dp))
+            androidx.compose.foundation.layout.Box(
+                Modifier.size(48.dp).background(fg.copy(alpha = 0.18f), androidx.compose.foundation.shape.CircleShape),
+                contentAlignment = androidx.compose.ui.Alignment.Center,
+            ) { Icon(t.icon, null, tint = fg, modifier = Modifier.size(28.dp)) }
             Column {
-                Text(t.label, color = Color.White, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                Text(t.sub, color = Color.White.copy(alpha = 0.85f), style = MaterialTheme.typography.bodySmall)
+                Text(t.label, color = fg, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                Text(
+                    if (off) "Non pris en charge (IPP absent)" else t.sub,
+                    color = fg.copy(alpha = 0.85f), style = MaterialTheme.typography.bodySmall,
+                )
             }
         }
     }
