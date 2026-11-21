@@ -275,15 +275,24 @@ fun QueueScreen(m: Modifier, ip: String) {
     var jobs by remember { mutableStateOf<List<Ipp.Job>>(emptyList()) }
     var loading by remember { mutableStateOf(false) }
     var msg by remember { mutableStateOf("") }
+    var lpd by remember { mutableStateOf<String?>(null) }
 
     fun load() {
         scope.launch {
             loading = true
             msg = try {
                 jobs = Ipp.jobs(ip, done)
+                lpd = null
                 if (jobs.isEmpty()) "Aucune tâche." else ""
             } catch (e: Exception) {
-                jobs = emptyList(); "Échec : ${e.message}"
+                jobs = emptyList()
+                // Sans IPP : état de la file par LPD (port 515).
+                lpd = try {
+                    withContext(Dispatchers.IO) { Lpd.status(ip) }.ifBlank { "Aucune tâche en attente." }
+                } catch (e2: Exception) {
+                    null
+                }
+                if (lpd != null) "" else "Échec : ${e.message}"
             }
             loading = false
         }
@@ -291,12 +300,37 @@ fun QueueScreen(m: Modifier, ip: String) {
     LaunchedEffect(ip, done) { load() }
 
     Column(m.padding(16.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            FilterChip(selected = !done, onClick = { done = false }, label = { Text("En cours") })
-            FilterChip(selected = done, onClick = { done = true }, label = { Text("Terminées") })
+        if (lpd == null) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(selected = !done, onClick = { done = false }, label = { Text("En cours") })
+                FilterChip(selected = done, onClick = { done = true }, label = { Text("Terminées") })
+            }
         }
         if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
         if (msg.isNotEmpty()) Text(msg)
+        lpd?.let { st ->
+            ElevatedCard(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("File de l'imprimante (LPD)", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    Text(st, style = MaterialTheme.typography.bodyMedium, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+                }
+            }
+            TextButton(onClick = {
+                scope.launch {
+                    msg = try {
+                        val r = withContext(Dispatchers.IO) { Lpd.removeAll(ip) }
+                        if (r.isBlank()) "Demande d'annulation envoyée." else r
+                    } catch (e: Exception) {
+                        "Annulation refusée : ${e.message}"
+                    }
+                    load()
+                }
+            }) { Text("Annuler toutes les tâches") }
+            Text(
+                "IPP absent : liste simplifiée fournie par l'imprimante. L'annulation dépend du firmware.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
         jobs.forEach { j ->
             ElevatedCard(Modifier.fillMaxWidth()) {
                 Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {

@@ -171,6 +171,21 @@ object Lpd {
         throw last
     }
 
+    private fun command(ip: String, line: String): String =
+        Socket().use { s ->
+            s.connect(InetSocketAddress(ip, 515), 2500)
+            s.soTimeout = 5000
+            s.getOutputStream().apply { write(line.toByteArray()); flush() }
+            val r = runCatching { s.getInputStream().readBytes() }.getOrDefault(ByteArray(0))
+            String(r, Charsets.ISO_8859_1).trim()
+        }
+
+    /** État de la file LPD (format long, RFC 1179 commande 4). */
+    fun status(ip: String, queue: String = "auto"): String = command(ip, "\u0004$queue \n")
+
+    /** Retire les tâches de la file (commande 5, agent « root » = toutes). */
+    fun removeAll(ip: String, queue: String = "auto"): String = command(ip, "\u0005$queue root\n")
+
     private fun sendQueue(ip: String, queue: String, data: ByteArray, job: String) {
         Socket().use { s ->
             s.connect(InetSocketAddress(ip, 515), 2500)

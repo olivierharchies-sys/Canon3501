@@ -219,8 +219,8 @@ fun HomeScreen(m: Modifier, prefs: PrinterPrefs, ip: String, setIp: (String) -> 
         Tile("Copier", "Copies, carte ID", Icons.Filled.ContentCopy, Color(0xFFF4511E), Screen.Copy),
         Tile("Entretien", "Nettoyage, buses", Icons.Filled.Build, Color(0xFF00897B), Screen.Maintenance),
         Tile("Encre et état", "Niveaux, alertes", Icons.Filled.WaterDrop, Color(0xFF8E24AA), Screen.Ink, needsIpp = true),
-        Tile("File d'attente", "Tâches, annulation", Icons.Filled.HourglassEmpty, Color(0xFF6D4C41), Screen.Queue, needsIpp = true),
-        Tile("Infos", "Firmware, compteurs", Icons.Filled.Info, Color(0xFF3949AB), Screen.Info, needsIpp = true),
+        Tile("File d'attente", "Tâches, annulation", Icons.Filled.HourglassEmpty, Color(0xFF6D4C41), Screen.Queue),
+        Tile("Infos", "Modèle, identifiant", Icons.Filled.Info, Color(0xFF3949AB), Screen.Info),
         Tile("Documents", "Scans enregistrés", Icons.Filled.Folder, Color(0xFFC62828), Screen.History),
         Tile("Réglages", "Imprimantes, alertes", Icons.Filled.Settings, Color(0xFF546E7A), Screen.Settings),
     )
