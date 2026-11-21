@@ -203,20 +203,32 @@ fun MaintenanceScreen(m: Modifier, prefs: PrinterPrefs, ip: String, go: (Screen)
     var msg by remember { mutableStateOf("") }
     var confirm by remember { mutableStateOf<Tool?>(null) }
     var refresh by remember { mutableIntStateOf(0) }
+    var watch by remember { mutableStateOf("") }
+    var raw by remember { mutableStateOf("") }
+    var watchJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     val fmt = remember { java.text.SimpleDateFormat("dd/MM/yyyy HH:mm", java.util.Locale.FRANCE) }
 
     fun runTool(t: Tool) {
         if (ip.isBlank()) { msg = "Renseignez d'abord l'adresse IP (Réglages)."; return }
+        watchJob?.cancel(); watch = ""; raw = ""
         scope.launch {
             busy = t; msg = "${t.label} : envoi…"
+            val base = ToolWatch.snapshot(ip)
+            var ok = false
             msg = try {
                 val via = CanonTools.run(ip, t, transport)
-                log.mark(t); prefs.lastPrint = System.currentTimeMillis(); refresh++
-                "${t.label} : commande acceptée ($via). Vérifiez que l'imprimante démarre."
+                log.mark(t); prefs.lastPrint = System.currentTimeMillis(); refresh++; ok = true
+                "${t.label} : commande acceptée ($via)."
             } catch (e: Exception) {
                 "${t.label} : échec.\n${e.message}\nLancez-la depuis le menu de l'imprimante."
             }
             busy = null
+            if (ok) {
+                raw = base?.let { "avant : $it" } ?: ""
+                watchJob = scope.launch {
+                    ToolWatch.follow(ip, base) { s, r -> watch = s; if (r.isNotEmpty()) raw = (base?.let { "avant : $it\n" } ?: "") + "actuel : $r" }
+                }
+            }
         }
     }
 
@@ -265,6 +277,10 @@ fun MaintenanceScreen(m: Modifier, prefs: PrinterPrefs, ip: String, go: (Screen)
         }
         if (busy != null) LinearProgressIndicator(Modifier.fillMaxWidth())
         if (msg.isNotEmpty()) Text(msg)
+        if (watch.isNotEmpty()) Text("État : $watch", style = MaterialTheme.typography.titleSmall)
+        if (raw.isNotEmpty()) androidx.compose.foundation.text.selection.SelectionContainer {
+            Text("Réponse brute (à m'envoyer) :\n$raw", style = MaterialTheme.typography.bodySmall)
+        }
         Text("Outils", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Tool.entries.forEach { t ->
             val last = remember(refresh) { log.last(t) }

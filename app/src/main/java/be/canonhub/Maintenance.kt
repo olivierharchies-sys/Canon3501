@@ -2,6 +2,7 @@ package be.canonhub
 
 import android.content.Context
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.io.IOException
 import java.net.DatagramPacket
@@ -136,6 +137,16 @@ object Bjnp {
         return String(r, start, end - start).trim()
     }
 
+    /** État de l'imprimante (UDP 0x20, comme cups-bjnp) : chaîne brute, format propre au modèle. */
+    fun status(ip: String): String {
+        val r = udp(ip, 0x20, 1, 0, ByteArray(0))
+        if (r.size < 16 || String(r, 0, 4) != "BJNP") throw IOException("réponse BJNP invalide")
+        if (r.size <= 18) return ""
+        val len = u16(r, 16)
+        val end = if (len in 3..(r.size - 16)) 16 + len else r.size
+        return String(r, 18, end - 18, Charsets.ISO_8859_1).filter { it >= ' ' }.trim()
+    }
+
     /** Champs lisibles de l'identifiant (MFG, MDL, CMD…). */
     fun fields(id: String): List<Pair<String, String>> = id.split(';').mapNotNull { f ->
         val k = f.substringBefore(':', "").trim()
@@ -229,5 +240,37 @@ object Lpd {
             o.write("\u0003${data.size} $df\n".toByteArray()); o.flush(); ack(i, "données")
             o.write(data); o.write(0); o.flush(); ack(i, "données reçues")
         }
+    }
+}
+
+/** Suivi d'un outil lancé : compare l'état BJNP à celui d'avant l'envoi. */
+object ToolWatch {
+    suspend fun snapshot(ip: String): String? = withContext(Dispatchers.IO) { runCatching { Bjnp.status(ip) }.getOrNull() }
+
+    /** Interroge toutes les 2 s ; onUpdate(état lisible, réponse brute). */
+    suspend fun follow(ip: String, base: String?, onUpdate: (String, String) -> Unit) {
+        val start = System.currentTimeMillis()
+        var seenBusy = false
+        var fails = 0
+        while (System.currentTimeMillis() - start < 15 * 60_000L) {
+            delay(2000)
+            val sec = (System.currentTimeMillis() - start) / 1000
+            val st = snapshot(ip)
+            if (st == null) {
+                if (++fails >= 5) { onUpdate("état indisponible (pas de réponse BJNP)", ""); return }
+                continue
+            }
+            fails = 0
+            val changed = base != null && st != base
+            if (changed) seenBusy = true
+            when {
+                base == null -> { onUpdate("état reçu ($sec s), pas de référence avant envoi", st); if (sec >= 60) return }
+                changed -> onUpdate("en cours… ($sec s)", st)
+                seenBusy -> { onUpdate("terminé ($sec s)", st); return }
+                sec >= 60 -> { onUpdate("aucun changement d'état détecté", st); return }
+                else -> onUpdate("en attente du démarrage… ($sec s)", st)
+            }
+        }
+        onUpdate("suivi arrêté après 15 min", "")
     }
 }
