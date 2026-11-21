@@ -322,6 +322,10 @@ object Rui {
         val c = open("https://$ip/rui/$path", if (body == null) "GET" else "POST", 15000)
         try {
             if (cookies.isNotEmpty()) c.setRequestProperty("Cookie", cookies.entries.joinToString("; ") { "${it.key}=${it.value}" })
+            // Comme Chrome Android : certaines pages varient selon le navigateur et la page d'origine.
+            c.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36")
+            c.setRequestProperty("Referer", "https://$ip/rui/logon_manager.html")
+            c.setRequestProperty("Origin", "https://$ip")
             if (body != null) {
                 c.doOutput = true
                 c.setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
@@ -357,12 +361,18 @@ object Rui {
             .joinToString("") { "%02x".format(it) }
         cookies.clear(); sbid = ""
         runCatching { req(ip, "logon_manager.html", null) }   // cookie de session initial, comme le navigateur
-        req(ip, "sendpw.cgi", "NAMAE=$hash&IDTYPE=2")
-        sbid = findSbid(runCatching { req(ip, "index.html", null) }.getOrDefault(""))
-        if (sbid.isEmpty()) throw IOException(
-            if (lastCode == 404) "interface web indisponible : fermez la session ouverte dans un navigateur, ou redémarrez l'imprimante"
-            else "connexion refusée : vérifiez le mot de passe"
-        )
+        val sent = req(ip, "sendpw.cgi", "NAMAE=$hash&IDTYPE=2")
+        val sendCode = lastCode
+        sbid = findSbid(sent)
+        val page = if (sbid.isEmpty()) runCatching { req(ip, "index.html", null) }.getOrDefault("") else ""
+        if (sbid.isEmpty()) sbid = findSbid(page)
+        if (sbid.isEmpty()) {
+            val why = if (lastCode == 404) "interface web indisponible : fermez la session ouverte dans un navigateur, ou redémarrez l'imprimante"
+                else "connexion refusée : vérifiez le mot de passe"
+            val diag = "sendpw $sendCode [${sent.replace(Regex("\\s+"), " ").take(160)}] · index $lastCode, ${page.length} car. " +
+                (if ("logon" in page) "(renvoie vers la connexion) " else "") + "· cookies ${cookies.keys}"
+            throw IOException("$why\n$diag")
+        }
     }
 
     /** Session absente ou expirée : RW_SES_NG, SES_ERR_URL, LOCKED ou même 404. */
