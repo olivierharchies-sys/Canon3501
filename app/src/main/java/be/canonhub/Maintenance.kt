@@ -17,24 +17,24 @@ import java.nio.ByteBuffer
  * Commandes de maintenance Canon (langage BJL, utilisé par les pilotes Canon IJ).
  * EXPÉRIMENTAL : Canon ne documente pas ces commandes ; le résultat dépend du firmware.
  */
-enum class Tool(val label: String, val bjl: String, val desc: String, val heavy: Boolean = false) {
+enum class Tool(val label: String, val bjl: String, val desc: String, val heavy: Boolean = false, val rui: String? = null) {
     NozzleCheck("Test des buses", "@TestPrint=NozzleCheck",
-        "Imprime le motif officiel de vérification des buses. Chargez du papier A4."),
+        "Imprime le motif officiel de vérification des buses. Chargez du papier A4.", rui = "ut_nozzle_check.cgi"),
     CleanAll("Nettoyage des têtes", "@Cleaning=1ALL",
-        "Nettoyage standard de toutes les couleurs. Refaites ensuite un test des buses."),
+        "Nettoyage standard de toutes les couleurs. Refaites ensuite un test des buses.", rui = "ut_normal_cln.cgi"),
     CleanBlack("Nettoyage noir", "@Cleaning=1K", "Nettoyage limité à la tête noire."),
     CleanColor("Nettoyage couleur", "@Cleaning=1CL", "Nettoyage limité à la tête couleur."),
     DeepClean("Nettoyage en profondeur", "@DeepCleaning=1ALL",
-        "Uniquement après deux nettoyages normaux sans effet. Consomme beaucoup d'encre.", heavy = true),
+        "Uniquement après deux nettoyages normaux sans effet. Consomme beaucoup d'encre.", heavy = true, rui = "ut_deep_cln.cgi"),
     Alignment("Alignement des têtes", "@TestPrint=Auto",
-        "Imprime la feuille d'alignement. Chargez du papier A4."),
+        "Imprime la feuille d'alignement. Chargez du papier A4.", rui = "ut_auto_regi.cgi"),
     Roller("Nettoyage des rouleaux", "@RollerCleaning",
-        "Retirez le papier du bac arrière avant de lancer."),
+        "Retirez le papier du bac arrière avant de lancer.", rui = "ut_roller_mf_cln.cgi"),
     Plate("Nettoyage de la platine", "@PlateCleaning",
-        "Contre les traces au verso. Pliez une feuille A4 en deux, dépliez-la, chargez-la pli vers le haut."),
+        "Contre les traces au verso. Pliez une feuille A4 en deux, dépliez-la, chargez-la pli vers le haut.", rui = "ut_platen_cln.cgi"),
 }
 
-enum class Transport(val label: String) { Auto("Auto"), Lpd("LPD 515"), Bjnp("BJNP"), Ipp("IPP"), Raw("Port 9100") }
+enum class Transport(val label: String) { Auto("Auto"), Web("Web"), Lpd("LPD 515"), Bjnp("BJNP"), Ipp("IPP"), Raw("Port 9100") }
 
 /** Mémorise la date du dernier lancement de chaque outil. */
 class ToolLog(ctx: Context) {
@@ -71,9 +71,10 @@ object CanonTools {
     fun payload(t: Tool): ByteArray = parts(t).reduce { a, b -> a + b }
 
     /** Envoie la commande ; renvoie le transport qui l'a acceptée. */
-    suspend fun run(ip: String, t: Tool, mode: Transport): String = withContext(Dispatchers.IO) {
+    suspend fun run(ip: String, t: Tool, mode: Transport, pwd: String = ""): String = withContext(Dispatchers.IO) {
         val data = payload(t)
-        val order = if (mode == Transport.Auto) listOf(Transport.Bjnp, Transport.Lpd, Transport.Raw, Transport.Ipp) else listOf(mode)
+        val web = if (t.rui != null) listOf(Transport.Web) else emptyList()
+        val order = if (mode == Transport.Auto) web + listOf(Transport.Bjnp, Transport.Lpd, Transport.Raw, Transport.Ipp) else listOf(mode)
         val errors = mutableListOf<String>()
         for (tr in order) {
             try {
@@ -82,6 +83,7 @@ object CanonTools {
                     Transport.Bjnp -> Bjnp.send(ip, parts(t))
                     Transport.Raw -> raw(ip, data)
                     Transport.Ipp -> Ipp.printRaw(ip, data)
+                    Transport.Web -> Rui.start(ip, pwd, t)
                     Transport.Auto -> Unit
                 }
                 return@withContext tr.label
@@ -292,5 +294,89 @@ object ToolWatch {
             }
         }
         onUpdate("suivi arrêté après 15 min", "")
+    }
+}
+
+/**
+ * Interface web de l'imprimante (Remote UI, https://ip/rui/), relevée sur la G3501 :
+ * - connexion : POST sendpw.cgi, NAMAE = SHA-256 hexa du mot de passe, IDTYPE = 2 ;
+ * - lancement : POST ut_xxx.cgi → <RESULT>RW_OK|RW_POLLING|RW_NG|LOCKED</RESULT>, <JOB_NUM> ;
+ * - suivi : POST get_job_status.cgi JOB_NUM=n → <getJobState> 1 en cours, 2 fini, 3 erreur, 4 annulé, 5 erreur en cours ;
+ * - SBID ajouté aux requêtes s'il figure dans la page (jeton de session).
+ */
+object Rui {
+    private val cookies = mutableMapOf<String, String>()
+    private var sbid = ""
+
+    private fun tag(x: String, n: String): String? = Regex("<$n>([^<]*)</$n>").find(x)?.groupValues?.get(1)
+
+    private fun req(ip: String, path: String, body: String?): String {
+        val c = open("https://$ip/rui/$path", if (body == null) "GET" else "POST", 15000)
+        try {
+            if (cookies.isNotEmpty()) c.setRequestProperty("Cookie", cookies.entries.joinToString("; ") { "${it.key}=${it.value}" })
+            if (body != null) {
+                c.doOutput = true
+                c.setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
+                c.outputStream.use { it.write(body.toByteArray()) }
+            }
+            val code = c.responseCode
+            c.headerFields.filterKeys { it != null && it.equals("Set-Cookie", true) }.values.flatten().forEach {
+                val kv = it.substringBefore(';')
+                if ('=' in kv) cookies[kv.substringBefore('=').trim()] = kv.substringAfter('=').trim()
+            }
+            return ((if (code >= 400) c.errorStream else c.inputStream)?.bufferedReader()?.readText()).orEmpty()
+        } finally { c.disconnect() }
+    }
+
+    private fun data(d: String) = if (sbid.isEmpty()) d else (if (d.isEmpty()) "" else "$d&") + "SBID=$sbid"
+
+    private fun needLogin(x: String) = "SES_ERR_URL" in x || tag(x, "RESULT") == "LOCKED"
+
+    private fun login(ip: String, pwd: String) {
+        if (pwd.isBlank()) throw IOException("mot de passe administrateur requis (Réglages)")
+        if (!pwd.matches(Regex("[0-9A-Za-z]{4,32}"))) throw IOException("mot de passe : 4 à 32 lettres ou chiffres")
+        val hash = java.security.MessageDigest.getInstance("SHA-256").digest(pwd.toByteArray())
+            .joinToString("") { "%02x".format(it) }
+        cookies.clear(); sbid = ""
+        req(ip, "sendpw.cgi", "NAMAE=$hash&IDTYPE=2")
+        val page = runCatching { req(ip, "index.html", null) }.getOrDefault("")
+        sbid = Regex("""id=["']SBID["'][^>]*value=["']([^"']*)""").find(page)?.groupValues?.get(1)
+            ?: Regex("""value=["']([^"']*)["'][^>]*id=["']SBID""").find(page)?.groupValues?.get(1) ?: ""
+    }
+
+    /** Lance l'outil ; renvoie le numéro de travail. */
+    fun start(ip: String, pwd: String, t: Tool): String {
+        val url = t.rui ?: throw IOException("pas d'équivalent dans l'interface web")
+        var r = req(ip, url, data(""))
+        if (needLogin(r)) { login(ip, pwd); r = req(ip, url, data("")) }
+        return when (tag(r, "RESULT")) {
+            "RW_OK", "RW_POLLING" -> tag(r, "JOB_NUM") ?: "0"
+            "RW_NG" -> throw IOException("refusé par l'imprimante (${tag(r, "DETAIL") ?: "occupée ou en erreur"})")
+            "LOCKED" -> throw IOException("mot de passe administrateur refusé")
+            else -> throw IOException("réponse inattendue : ${r.take(150)}")
+        }
+    }
+
+    /** Lance puis suit l'outil ; onUpdate reçoit l'état lisible. Renvoie le message final. */
+    suspend fun run(ip: String, pwd: String, t: Tool, onUpdate: (String) -> Unit): String = withContext(Dispatchers.IO) {
+        val job = start(ip, pwd, t)
+        val t0 = System.currentTimeMillis()
+        delay(800)
+        while (System.currentTimeMillis() - t0 < 15 * 60_000L) {
+            val sec = (System.currentTimeMillis() - t0) / 1000
+            val s = req(ip, "get_job_status.cgi", data("JOB_NUM=$job"))
+            if (needLogin(s)) throw IOException("session perdue pendant le suivi")
+            val msg = when (tag(s, "getJobState")) {
+                "1" -> "en cours… ($sec s)"
+                "5" -> "erreur imprimante : vérifiez l'écran et le papier ($sec s)"
+                "2" -> return@withContext "terminé ($sec s)"
+                "3" -> throw IOException("l'imprimante signale une erreur")
+                "4" -> return@withContext "annulé"
+                else -> "état inconnu : ${s.take(80)}"
+            }
+            withContext(Dispatchers.Main) { onUpdate(msg) }
+            delay(2500)
+        }
+        "suivi arrêté après 15 min"
     }
 }

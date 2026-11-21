@@ -67,6 +67,10 @@ class PrinterPrefs(ctx: Context) {
     var lastInkNotify: Long
         get() = sp.getLong("lastInkNotify", 0L)
         set(v) = sp.edit().putLong("lastInkNotify", v).apply()
+    /** Mot de passe administrateur de l'interface web (outils d'entretien). */
+    var ruiPassword: String
+        get() = sp.getString("ruiPwd", "") ?: ""
+        set(v) = sp.edit().putString("ruiPwd", v).apply()
     var ippHint: String
         get() = sp.getString("ippHint", "") ?: ""
         set(v) = sp.edit().putString("ippHint", v).apply()

@@ -213,10 +213,27 @@ fun MaintenanceScreen(m: Modifier, prefs: PrinterPrefs, ip: String, go: (Screen)
         watchJob?.cancel(); watch = ""; raw = ""
         scope.launch {
             busy = t; msg = "${t.label} : envoi…"
+            if (t.rui != null && (transport == Transport.Auto || transport == Transport.Web)) {
+                var webErr: String? = null
+                try {
+                    watch = "lancement…"
+                    val end = Rui.run(ip, prefs.ruiPassword, t) { watch = it }
+                    log.mark(t); prefs.lastPrint = System.currentTimeMillis(); refresh++
+                    msg = "${t.label} : lancé (Web)."; watch = end; busy = null
+                    return@launch
+                } catch (e: Exception) {
+                    webErr = e.message; watch = ""
+                }
+                if (transport == Transport.Web) {
+                    msg = "${t.label} : échec (Web).\n$webErr"; busy = null
+                    return@launch
+                }
+                msg = "Web : $webErr\nEssai par les autres modes…"
+            }
             val base = ToolWatch.snapshot(ip)
             var ok = false
             msg = try {
-                val via = CanonTools.run(ip, t, transport)
+                val via = CanonTools.run(ip, t, if (transport == Transport.Auto && t.rui != null) Transport.Bjnp else transport, prefs.ruiPassword)
                 log.mark(t); prefs.lastPrint = System.currentTimeMillis(); refresh++; ok = true
                 "${t.label} : commande acceptée ($via)."
             } catch (e: Exception) {
@@ -265,6 +282,17 @@ fun MaintenanceScreen(m: Modifier, prefs: PrinterPrefs, ip: String, go: (Screen)
             }
         }
         Section("Mode d'envoi", Icons.Filled.Settings, sub = "Commandes Canon par le réseau (expérimental)") {
+            var pwd by remember { mutableStateOf(prefs.ruiPassword) }
+            OutlinedTextField(
+                value = pwd,
+                onValueChange = { pwd = it.trim(); prefs.ruiPassword = pwd },
+                label = { Text("Mot de passe admin (interface web)") },
+                singleLine = true,
+                visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Hint("Mode Web : mêmes commandes que la page https://$ip/. Mot de passe par défaut : n° de série.")
             Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Transport.entries.forEach { tr ->
                     FilterChip(

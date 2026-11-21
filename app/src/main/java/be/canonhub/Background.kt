@@ -126,7 +126,7 @@ class ToolReceiver : BroadcastReceiver() {
                     val log = ToolLog(app)
                     val text = try {
                         if (p.ip.isBlank()) throw IllegalStateException("adresse IP non configurée")
-                        val via = CanonTools.run(p.ip, Tool.NozzleCheck, log.transport)
+                        val via = CanonTools.run(p.ip, Tool.NozzleCheck, log.transport, p.ruiPassword)
                         log.mark(Tool.NozzleCheck)
                         p.lastPrint = System.currentTimeMillis()
                         "Commande envoyée ($via)."
