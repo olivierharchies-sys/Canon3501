@@ -23,6 +23,14 @@ import java.net.URL
 
 data class Profile(val name: String, val ip: String)
 
+/** Voies d'envoi vers l'imprimante. */
+enum class Route(val label: String, val sub: String) {
+    Driver("Pilote intégré", "Gutenprint, tous réglages"),
+    Android("Service Android", "Fenêtre d'impression Canon"),
+    CanonApp("Canon PRINT", "Appli officielle"),
+    Ipp("Direct IPP", "Sans fenêtre"),
+}
+
 /** Réglages persistants : imprimante courante, profils, alertes. */
 class PrinterPrefs(ctx: Context) {
     private val sp = ctx.getSharedPreferences("printer", Context.MODE_PRIVATE)
@@ -56,6 +64,18 @@ class PrinterPrefs(ctx: Context) {
     var directPrint: Boolean
         get() = sp.getBoolean("direct", false)
         set(v) = sp.edit().putBoolean("direct", v).apply()
+    /** Voie d'impression : Driver, Android, CanonApp, Ipp. Par défaut, déduite des anciens réglages. */
+    var printRoute: Route
+        get() = sp.getString("route", null)?.let { runCatching { Route.valueOf(it) }.getOrNull() }
+            ?: when { gpEnabled -> Route.Driver; directPrint -> Route.Ipp; else -> Route.Android }
+        set(v) = sp.edit().putString("route", v.name).putBoolean("gpOn", v == Route.Driver).putBoolean("direct", v == Route.Ipp).apply()
+    /** Voie d'impression des copies : pilote intégré par défaut. */
+    var copyRoute: Route
+        get() = sp.getString("copyRoute", null)?.let { runCatching { Route.valueOf(it) }.getOrNull() } ?: Route.Driver
+        set(v) = sp.edit().putString("copyRoute", v.name).apply()
+    var copyQuality: Quality
+        get() = runCatching { Quality.valueOf(sp.getString("copyQ", "Standard")!!) }.getOrDefault(Quality.Standard)
+        set(v) = sp.edit().putString("copyQ", v.name).apply()
     var inkAlert: Boolean
         get() = sp.getBoolean("inkAlert", false)
         set(v) = sp.edit().putBoolean("inkAlert", v).apply()

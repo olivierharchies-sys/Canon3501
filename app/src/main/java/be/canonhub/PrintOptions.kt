@@ -134,7 +134,7 @@ object PrintPrep {
     }
 
     /** Construit un PDF au format choisi ; renvoie le fichier et l'orientation retenue. */
-    fun prepare(ctx: Context, uri: Uri, mime: String, o: PrintOpts): Pair<File, Boolean> {
+    fun prepare(ctx: Context, uri: Uri, mime: String, o: PrintOpts, range: String = ""): Pair<File, Boolean> {
         Source(ctx, uri, mime, o.quality.dpi).use { src ->
             val landscape = when (o.orient) {
                 Orient.Portrait -> false
@@ -148,12 +148,13 @@ object PrintPrep {
             val cells = cells(o.nUp, w, h, margin)
             val doc = PdfDocument()
             val pt = paint(o)
+            val order = Gutenprint.parseRange(range, src.count)
             var idx = 0; var sheet = 0
-            while (idx < src.count) {
+            while (idx < order.size) {
                 val page = doc.startPage(PdfDocument.PageInfo.Builder(w.toInt(), h.toInt(), ++sheet).create())
                 for (cell in cells) {
-                    if (idx >= src.count) break
-                    val b = src.page(idx++)
+                    if (idx >= order.size) break
+                    val b = src.page(order[idx++])
                     draw(page.canvas, b, cell, o.fill && o.nUp == 1, pt)
                     if (mime == "application/pdf") b.recycle()
                 }

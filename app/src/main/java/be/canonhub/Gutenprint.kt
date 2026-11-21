@@ -190,6 +190,42 @@ object Gutenprint {
             cyan = cy, magenta = ma, yellow = ye) to notes
     }
 
+    /**
+     * Options de travail équivalentes au service Canon : copies, assemblage, plage de pages,
+     * orientation, ordre inverse.
+     */
+    data class Job(
+        val copies: Int = 1,
+        val collate: Boolean = true,
+        val pages: String = "",
+        val orient: Orient = Orient.Auto,
+        val reverse: Boolean = false,
+    )
+
+    /** « 1-3, 5 » → indices 0, 1, 2, 4. Vide = toutes les pages. */
+    fun parseRange(s: String, count: Int): List<Int> {
+        if (s.isBlank()) return (0 until count).toList()
+        val out = LinkedHashSet<Int>()
+        s.split(',', ';').map { it.trim() }.filter { it.isNotEmpty() }.forEach { part ->
+            val ab = part.split('-').map { it.trim() }
+            val a = ab[0].toIntOrNull() ?: throw IOException("pages invalides : $part")
+            val b = if (ab.size > 1) (ab[1].ifEmpty { "$count" }.toIntOrNull() ?: throw IOException("pages invalides : $part")) else a
+            for (n in minOf(a, b)..maxOf(a, b)) if (n in 1..count) out += n - 1
+        }
+        if (out.isEmpty()) throw IOException("aucune page dans « $s » (document : $count p.)")
+        return out.toList()
+    }
+
+    /** Ordre d'impression : plage, ordre inverse, copies assemblées ou groupées. */
+    fun sequence(j: Job, count: Int): List<Int> {
+        var l = parseRange(j.pages, count)
+        if (j.reverse) l = l.reversed()
+        val n = j.copies.coerceIn(1, 99)
+        val seq = if (j.collate) List(n) { l }.flatten() else l.flatMap { i -> List(n) { i } }
+        if (seq.size > 999) throw IOException("trop de pages (${seq.size}) : réduisez copies ou plage")
+        return seq
+    }
+
     /** Choix proposés par le pilote pour un paramètre (dépendent des autres réglages). */
     suspend fun choices(ctx: Context, param: String, sel: Map<String, String>): List<Choice> = withContext(Dispatchers.IO) {
         init(ctx)
@@ -210,6 +246,7 @@ object Gutenprint {
         ctx: Context, ip: String, uri: Uri, mime: String,
         sel: Map<String, String>, borderless: Boolean, fill: Boolean, dpi: Int,
         truePage: Boolean = false,
+        job: Job = Job(),
         onStep: (String) -> Unit,
     ): String = withContext(Dispatchers.IO) {
         init(ctx)
@@ -238,11 +275,24 @@ object Gutenprint {
                     val cx = base.centerX() + t.shiftX * px; val cy = base.centerY() + t.shiftY * px
                     val bw = base.width() * t.scale / 2; val bh = base.height() * t.scale / 2
                     val box = RectF(cx - bw, cy - bh, cx + bw, cy + bh)
+                    // Même case tournée d'un quart de tour, pour les pages en paysage.
+                    val boxL = RectF(cx - bh, cy - bw, cx + bh, cy + bw)
                     val row = IntArray(w)
-                    for (i in 0 until pages.count) {
-                        withContext(Dispatchers.Main) { onStep("préparation page ${i + 1}/${pages.count}") }
+                    val seq = sequence(job, pages.count)
+                    seq.forEachIndexed { n, i ->
+                        withContext(Dispatchers.Main) { onStep("préparation page ${n + 1}/${seq.size}") }
                         page.eraseColor(Color.WHITE)
-                        pages.drawInto(i, Canvas(page), box, fill)
+                        val land = when (job.orient) {
+                            Orient.Portrait -> false
+                            Orient.Landscape -> true
+                            Orient.Auto -> pages.isWide(i)
+                        }
+                        val cv = Canvas(page)
+                        if (land) {
+                            cv.save(); cv.rotate(-90f, cx, cy)
+                            pages.drawInto(i, cv, boxL, fill)
+                            cv.restore()
+                        } else pages.drawInto(i, cv, box, fill)
                         var p = 0
                         for (y in 0 until h) {
                             page.getPixels(row, 0, w, 0, y, w, 1)
@@ -296,6 +346,9 @@ object Gutenprint {
             Images.decode(raw, 4000) ?: throw IOException("image illisible")
         } else null
         val count = pdf?.pageCount ?: 1
+
+        /** Page plus large que haute (paysage). */
+        fun isWide(i: Int): Boolean = image?.let { it.width > it.height } ?: pdf!!.openPage(i).use { it.width > it.height }
 
         fun drawInto(i: Int, c: Canvas, r: RectF, fill: Boolean) {
             val b = image ?: pdf!!.openPage(i).use { p ->

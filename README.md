@@ -7,17 +7,20 @@ Application Kotlin / Jetpack Compose pour piloter une imprimante multifonction C
 2. Laissez Gradle synchroniser, puis lancez sur un téléphone Android 10+ (minSdk 29) connecté au même Wi-Fi que l'imprimante.
 3. Dans **Réglages**, saisissez l'adresse IP de l'imprimante et appuyez sur **Tester**.
 
-## Tuiles
-| Tuile | Fonctionnement |
+## Organisation (v2.0)
+Navigation basse : **Accueil · Imprimer · Copier · Numériser · Documents**.
+
+| Écran | Contenu |
 |---|---|
-| Imprimer | PDF ou image ; fenêtre Android ou impression directe IPP (copies, couleur) ; recto-verso manuel ; partage depuis d'autres applis |
-| Numériser | eSCL : A4, A5, 10×15, carte ; 150/300/600 dpi ; multipage ; recadrage auto, luminosité, contraste ; PDF, JPEG, partage |
-| Copier | scan puis impression ; copies ; carte d'identité recto/verso sur une feuille |
-| Encre et état | IPP : niveaux, état, alertes |
-| Entretien | test des buses, nettoyages, alignement, rouleaux, platine (BJL via BJNP / RAW / IPP) ; historique |
-| File d'attente | tâches en cours ou terminées, annulation |
-| Infos | firmware, numéro de série, compteurs, formats acceptés |
-| Réglages | IP, recherche mDNS, diagnostic, plusieurs imprimantes, alertes encre et anti-bouchage |
+| Accueil | État de l'imprimante, actions rapides (Imprimer, Copier, Numériser), outils (Entretien, Encre, File, Documents, Infos, Réglages), activité |
+| Imprimer | Document avec aperçu → voie d'envoi (Pilote intégré, Service Android, Canon PRINT, IPP) → papier, mise en page, qualité/couleur, copies et pages, recto-verso manuel, planche photos |
+| Copier | Type d'original (A4, A5, photo, carte ID R/V), exemplaires, couleur, qualité, papier ; immédiate ou par lot ; imprimée par le pilote intégré |
+| Numériser | Multipage, retouche, OCR, PDF/JPEG, classement |
+
+### Pilote intégré (Gutenprint) – équivalences avec le service Canon
+Format, type de papier, alimentation, résolution, qualité (brouillon/standard/élevée), couleur ou N&B,
+orientation (auto/portrait/paysage), pages par feuille (1/2/4), sans bordure, remplissage,
+exemplaires (1 à 99), assemblage, plage de pages (« 1-3, 5 »), ordre inverse, recto-verso manuel.
 
 Widget « Canon : encre » : niveaux, Scan, Test des buses, actualisation.
 

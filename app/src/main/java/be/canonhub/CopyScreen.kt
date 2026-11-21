@@ -1,0 +1,322 @@
+@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+
+package be.canonhub
+
+import android.graphics.Bitmap
+import android.net.Uri
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AutoFixHigh
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Collections
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.CreditCard
+import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.FilterBAndW
+import androidx.compose.material.icons.filled.Input
+import androidx.compose.material.icons.filled.Inventory2
+import androidx.compose.material.icons.filled.Layers
+import androidx.compose.material.icons.filled.Palette
+import androidx.compose.material.icons.filled.Photo
+import androidx.compose.material.icons.filled.Print
+import androidx.compose.material.icons.filled.Style
+import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.ViewQuilt
+import androidx.compose.material.icons.filled.Article
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
+import java.io.IOException
+
+fun areaIcon(a: Area): ImageVector = when (a) {
+    Area.A4 -> Icons.Filled.Description
+    Area.A5 -> Icons.Filled.Article
+    Area.Photo -> Icons.Filled.Photo
+    Area.Card -> Icons.Filled.CreditCard
+}
+
+fun areaLabel(a: Area): String = when (a) {
+    Area.A4 -> "Document A4"
+    Area.A5 -> "Document A5"
+    Area.Photo -> "Photo 10×15"
+    Area.Card -> "Carte ID"
+}
+
+fun areaSub(a: Area): String = when (a) {
+    Area.A4 -> "Courrier, facture"
+    Area.A5 -> "Demi-feuille"
+    Area.Photo -> "Tirage photo"
+    Area.Card -> "Recto + verso, 1 feuille"
+}
+
+/** Étape de la copie de carte (recto puis verso). */
+@Composable
+fun CardSteps(frontDone: Boolean) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        listOf("Recto" to frontDone, "Verso" to false).forEachIndexed { i, (t, done) ->
+            val active = if (i == 0) !frontDone else frontDone
+            val c = when {
+                done -> Color(0xFF12B76A)
+                active -> Brand.Copy[1]
+                else -> MaterialTheme.colorScheme.outline
+            }
+            Box(Modifier.size(30.dp).background(c, CircleShape), contentAlignment = Alignment.Center) {
+                if (done) Icon(Icons.Filled.Check, null, tint = Color.White, modifier = Modifier.size(18.dp))
+                else Text("${i + 1}", color = Color.White, fontWeight = FontWeight.Bold)
+            }
+            Spacer(Modifier.width(8.dp))
+            Text(t, fontWeight = if (active) FontWeight.Bold else FontWeight.Normal)
+            if (i == 0) {
+                Spacer(Modifier.width(10.dp))
+                Box(Modifier.size(32.dp, 2.dp).background(MaterialTheme.colorScheme.outlineVariant))
+                Spacer(Modifier.width(10.dp))
+            }
+        }
+    }
+}
+
+@Composable
+fun CopyScreen(m: Modifier, prefs: PrinterPrefs, ip: String) {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var area by remember { mutableStateOf(Area.A4) }
+    var dpi by remember { mutableIntStateOf(300) }
+    var color by remember { mutableStateOf(true) }
+    var copies by remember { mutableIntStateOf(1) }
+    var quality by remember { mutableStateOf(prefs.copyQuality) }
+    var route by remember { mutableStateOf(prefs.copyRoute.let { if (it == Route.Driver && !Gutenprint.available) Route.Android else it }) }
+    var busy by remember { mutableStateOf(false) }
+    var msg by remember { mutableStateOf("") }
+    var front by remember { mutableStateOf<Bitmap?>(null) }
+    var out by remember { mutableStateOf(OutFmt()) }
+    var filt by remember { mutableStateOf(Filter.None) }
+    var batch by remember { mutableStateOf(prefs.copyBatch) }
+    var layout by remember { mutableStateOf(prefs.copyLayout) }
+    var queue by remember { mutableStateOf<List<CopyItem>>(emptyList()) }
+    var sel by remember { mutableIntStateOf(0) }
+    val drv = rememberDriver(prefs, route == Route.Driver)
+    val gpDpi = when (quality) { Quality.Draft -> 150; Quality.Standard -> 200; Quality.High -> 300 }
+
+    /** Une feuille : pilote intégré, IPP direct ou fenêtre Android. */
+    suspend fun printSheet(bmp: Bitmap): String = when (route) {
+        Route.Driver -> try {
+            driverSheet(ctx, ip, drv, bmp, color, copies, gpDpi) { msg = it }
+        } catch (e: Exception) {
+            printBitmap(ctx, "copie", bmp)
+            "Pilote intégré : échec (${e.message}). Fenêtre Android ouverte."
+        }
+        Route.Ipp -> try {
+            val data = withContext(Dispatchers.Default) { Images.jpeg(Calib.fixA4(bmp)) }
+            val id = Ipp.printDoc(ip, data, "image/jpeg", "Copie", copies, color)
+            markPrint(ctx)
+            "Copie envoyée (tâche $id)."
+        } catch (e: Exception) {
+            printBitmap(ctx, "copie", bmp)
+            "Impression directe refusée (${e.message}) : fenêtre Android ouverte."
+        }
+        else -> {
+            printBitmap(ctx, "copie", bmp)
+            "Fenêtre d'impression ouverte : réglez le nombre de copies."
+        }
+    }
+
+    /** Met en page et imprime une liste de documents. */
+    suspend fun printAll(items: List<CopyItem>): String {
+        val f = File(ctx.cacheDir, "copie.pdf")
+        var first: Bitmap? = null
+        val fix = route != Route.Driver
+        val n = withContext(Dispatchers.Default) {
+            val doc = android.graphics.pdf.PdfDocument()
+            var k = 0
+            CopyLayout.render(items, layout, out.target(), filt) { b ->
+                k++
+                if (k == 1) first = b
+                CopyLayout.addPdfPage(doc, b, k, fix)
+                if (k > 1) b.recycle()
+            }
+            if (k > 1) f.outputStream().use { doc.writeTo(it) }
+            doc.close()
+            k
+        }
+        if (n == 0) throw IOException("rien à imprimer")
+        PrinterPrefs(ctx).bump("copies", items.size)
+        val docs = items.size
+        if (n == 1) {
+            val r = printSheet(first!!)
+            return if (docs > 1) "$docs documents sur 1 feuille. $r" else r
+        }
+        val r = if (route == Route.Driver) try {
+            driverFile(ctx, ip, drv, Uri.fromFile(f), "application/pdf", color, copies, gpDpi) { msg = it }
+        } catch (e: Exception) {
+            androidPrint(ctx, Uri.fromFile(f), "application/pdf")
+            "Pilote intégré : échec (${e.message}). Fenêtre Android ouverte."
+        } else {
+            androidPrint(ctx, Uri.fromFile(f), "application/pdf")
+            "Fenêtre d'impression ouverte."
+        }
+        return "$docs document(s) sur $n feuilles. $r"
+    }
+
+    suspend fun add(item: CopyItem): String =
+        if (batch) {
+            queue = queue + item; sel = queue.size - 1
+            "Ajouté au lot (${queue.size}). Posez le document suivant."
+        } else printAll(listOf(item))
+
+    fun scanNow() {
+        scope.launch {
+            busy = true; msg = "Numérisation en cours…"
+            msg = try {
+                val b = ScanService.keep(ctx) { Escl.scan(ip, dpi, color, area) }
+                val f = front
+                if (area != Area.Card) {
+                    msg = "Mise en page…"
+                    add(CopyItem(Page(b, dpi)))
+                } else if (f == null) {
+                    front = withContext(Dispatchers.Default) { Images.decode(b, 3508) } ?: throw IOException("image illisible")
+                    "Recto lu. Retournez la carte au même endroit, puis « Lire le verso »."
+                } else {
+                    val sheet = withContext(Dispatchers.Default) {
+                        val back = Images.decode(b, 3508) ?: throw IOException("image illisible")
+                        Images.jpeg(Images.cardSheet(f, back), 92)
+                    }
+                    front = null
+                    add(CopyItem(Page(sheet, 300), sheet = true))
+                }
+            } catch (e: Exception) {
+                "Échec : ${e.message}"
+            }
+            busy = false
+        }
+    }
+
+    ActionScreen(m, bottom = {
+        StatusMsg(msg, busy)
+        if (batch && queue.isNotEmpty()) {
+            BigButton("Imprimer le lot (${queue.size})", Icons.Filled.Print, Brand.Print, busy = busy) {
+                scope.launch {
+                    busy = true; msg = "Mise en page…"
+                    msg = try {
+                        val r = printAll(queue)
+                        queue = emptyList(); sel = 0
+                        r
+                    } catch (e: Exception) { "Échec : ${e.message}" }
+                    busy = false
+                }
+            }
+        }
+        BigButton(
+            when {
+                area == Area.Card && front == null -> "Lire le recto"
+                area == Area.Card -> "Lire le verso"
+                batch -> "Numériser et ajouter (${queue.size + 1})"
+                copies > 1 && route != Route.Android -> "Copier · $copies exemplaires"
+                else -> "Copier"
+            },
+            Icons.Filled.ContentCopy, Brand.Copy, busy = busy,
+        ) { scanNow() }
+    }) {
+        Hero(
+            "Copier",
+            "${areaLabel(area)} · ${if (color) "Couleur" else "N&B"} · ${route.label}",
+            Icons.Filled.ContentCopy, Brand.Copy,
+        )
+
+        Section("Que copiez-vous ?", Icons.Filled.Layers, accent = Brand.Copy[1]) {
+            ChoiceGrid(Area.entries, area, 2, ::areaLabel, ::areaSub, ::areaIcon, accent = Brand.Copy[1]) { area = it; front = null }
+            if (area == Area.Card) CardSteps(front != null)
+            else if (area != Area.A4) Hint("Placez le document contre le coin repère de la vitre.")
+        }
+
+        Section("Réglages", Icons.Filled.Tune, accent = Brand.Copy[1]) {
+            if (route != Route.Android) Counter("Exemplaires", copies, 1..99, Icons.Filled.Collections) { copies = it }
+            else Hint("Nombre d'exemplaires : dans la fenêtre d'impression.")
+            Segmented(listOf(true, false), color, { if (it) "Couleur" else "Noir et blanc" },
+                { if (it) Icons.Filled.Palette else Icons.Filled.FilterBAndW }) { color = it }
+            if (route == Route.Driver) {
+                Segmented(Quality.entries, quality, { it.label }, ::qualityIcon) { quality = it; prefs.copyQuality = it }
+                if (drv.err.isNotEmpty()) Text(drv.err, color = MaterialTheme.colorScheme.error)
+                DriverPicker(drv, "MediaType", "Type de papier", Icons.Filled.Style)
+                DriverPicker(drv, "InputSlot", "Alimentation", Icons.Filled.Input)
+            }
+        }
+
+        Section("Mode", Icons.Filled.Inventory2, accent = Brand.Copy[1]) {
+            Segmented(listOf(false, true), batch, { if (it) "Par lot" else "Immédiate" }) { batch = it; prefs.copyBatch = it }
+            Hint(if (batch) "Numérisez plusieurs documents, puis imprimez l'ensemble." else "Chaque document est imprimé juste après le scan.")
+            if (batch && queue.isNotEmpty()) {
+                PageStrip(queue.map { it.page }, sel.coerceIn(0, queue.size - 1)) { sel = it }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(enabled = !busy, modifier = Modifier.weight(1f), onClick = {
+                        queue = queue.toMutableList().also { it.removeAt(sel.coerceIn(0, queue.size - 1)) }
+                        sel = (sel - 1).coerceAtLeast(0)
+                    }) { Text("Retirer") }
+                    OutlinedButton(enabled = !busy, modifier = Modifier.weight(1f), onClick = { queue = emptyList(); sel = 0 }) { Text("Vider") }
+                }
+            }
+        }
+
+        if (area != Area.Card) Fold("Mise en page et format", Icons.Filled.ViewQuilt, sub = layout.label, accent = Brand.Copy[1]) {
+            Chips(PageLayout.entries, layout, { it.label }) { layout = it; prefs.copyLayout = it }
+            Hint(
+                when (layout) {
+                    PageLayout.One -> "Une feuille par document."
+                    PageLayout.Pack -> "Documents recadrés, à taille réelle, regroupés sur le moins de feuilles (tickets, cartes)."
+                    PageLayout.Two -> "Deux documents réduits par feuille A4 (A5 chacun)."
+                },
+            )
+            FormatPicker(out, { out = it })
+            if (out.fmt != Fmt.Original) Hint("Format imposé : une feuille par document, redressé et recadré.")
+        }
+
+        Fold("Retouche", Icons.Filled.AutoFixHigh, sub = filt.label, accent = Brand.Copy[1]) {
+            FilterChips(filt) { filt = it }
+            if (filt == Filter.Doc || filt == Filter.BW) Hint("Fond blanchi : économise l'encre.")
+        }
+
+        Fold("Numérisation et envoi", Icons.Filled.Print, sub = "$dpi dpi · ${route.label}", accent = Brand.Copy[1]) {
+            Label("Résolution du scan")
+            Segmented(listOf(150, 300, 600), dpi, { "$it dpi" }) { dpi = it }
+            Label("Imprimer avec")
+            ChoiceGrid(
+                listOf(Route.Driver, Route.Android, Route.Ipp), route, 3, { it.label }, { null }, ::routeIcon,
+                accent = Brand.Copy[1], enabled = { it != Route.Driver || Gutenprint.available },
+            ) { route = it; prefs.copyRoute = it }
+            Hint(
+                when (route) {
+                    Route.Driver -> "Pilote intégré : copie à taille réelle, sans fenêtre, papier et qualité réglés ici."
+                    Route.Ipp -> "IPP direct : si l'imprimante l'accepte, sinon fenêtre Android."
+                    else -> "Fenêtre Android : réglages dans le service Canon."
+                },
+            )
+        }
+    }
+}

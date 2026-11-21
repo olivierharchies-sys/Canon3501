@@ -163,30 +163,31 @@ fun App(prefs: PrinterPrefs, incoming: Intent?, consumed: () -> Unit) {
 
     val snack = remember { androidx.compose.material3.SnackbarHostState() }
     androidx.compose.runtime.CompositionLocalProvider(LocalSnack provides snack) {
+    // Écrans principaux : en-tête graphique propre, sans barre de titre.
+    val tabs = setOf(Screen.Home, Screen.Print, Screen.Copy, Screen.Scan, Screen.History)
     Scaffold(snackbarHost = { androidx.compose.material3.SnackbarHost(snack) }, topBar = {
-        TopAppBar(
-            title = { Text(screen.title) },
+        if (screen !in tabs) TopAppBar(
+            title = { Text(screen.title, fontWeight = FontWeight.SemiBold) },
             navigationIcon = {
-                if (screen != Screen.Home) {
-                    IconButton(onClick = { screen = if (screen == Screen.Calib || screen == Screen.GpTune) Screen.Settings else Screen.Home }) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "Retour")
-                    }
+                IconButton(onClick = { screen = if (screen == Screen.Calib || screen == Screen.GpTune) Screen.Settings else Screen.Home }) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, "Retour")
                 }
             },
         )
     }, bottomBar = {
-        androidx.compose.material3.NavigationBar {
+        androidx.compose.material3.NavigationBar(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest) {
             listOf(
                 Triple(Screen.Home, "Accueil", Icons.Filled.Home),
-                Triple(Screen.Scan, "Numériser", Icons.Filled.DocumentScanner),
                 Triple(Screen.Print, "Imprimer", Icons.Filled.Print),
+                Triple(Screen.Copy, "Copier", Icons.Filled.ContentCopy),
+                Triple(Screen.Scan, "Numériser", Icons.Filled.DocumentScanner),
                 Triple(Screen.History, "Documents", Icons.Filled.Folder),
             ).forEach { (sc, label, icon) ->
                 NavigationBarItem(
                     selected = screen == sc,
                     onClick = { screen = sc },
                     icon = { Icon(icon, null) },
-                    label = { Text(label) },
+                    label = { Text(label, maxLines = 1) },
                 )
             }
         }
@@ -213,12 +214,7 @@ fun App(prefs: PrinterPrefs, incoming: Intent?, consumed: () -> Unit) {
     }
 }
 
-// ---------- Accueil en tuiles ----------
-
-data class Tile(
-    val label: String, val sub: String, val icon: ImageVector, val color: Color, val target: Screen,
-    val needsIpp: Boolean = false,
-)
+// ---------- Accueil : voir Home.kt ----------
 
 /** État de l'imprimante affiché en tête de l'accueil. */
 data class HomeStatus(val online: Boolean, val model: String, val ipp: Boolean)
@@ -229,104 +225,6 @@ suspend fun homeStatus(ip: String): HomeStatus = withContext(Dispatchers.IO) {
         Bjnp.fields(Bjnp.deviceId(ip)).firstOrNull { it.first == "MDL" || it.first == "MODEL" }?.second
     }.getOrNull().orEmpty()
     HomeStatus(online, model, online && portOpen(ip, 631, 1000))
-}
-
-@Composable
-fun HomeScreen(m: Modifier, prefs: PrinterPrefs, ip: String, setIp: (String) -> Unit, go: (Screen) -> Unit) {
-    val tiles = listOf(
-        Tile("Imprimer", "PDF, photos, recto-verso", Icons.Filled.Print, Color(0xFF1E88E5), Screen.Print),
-        Tile("Numériser", "Multipage, PDF", Icons.Filled.DocumentScanner, Color(0xFF43A047), Screen.Scan),
-        Tile("Copier", "Copies, carte ID", Icons.Filled.ContentCopy, Color(0xFFF4511E), Screen.Copy),
-        Tile(
-            "Entretien",
-            if (prefs.clogReminder && (daysSince(prefs.lastPrint) ?: 0L) >= prefs.clogDays) "Test des buses conseillé" else "Nettoyage, buses",
-            Icons.Filled.Build, Color(0xFF00897B), Screen.Maintenance,
-        ),
-        Tile("Encre et état", "Niveaux, alertes", Icons.Filled.WaterDrop, Color(0xFF8E24AA), Screen.Ink, needsIpp = true),
-        Tile("File d'attente", "Tâches, annulation", Icons.Filled.HourglassEmpty, Color(0xFF6D4C41), Screen.Queue),
-        Tile("Infos", "Modèle, identifiant", Icons.Filled.Info, Color(0xFF3949AB), Screen.Info),
-        Tile("Documents", "Scans enregistrés", Icons.Filled.Folder, Color(0xFFC62828), Screen.History),
-        Tile("Réglages", "Imprimantes, alertes", Icons.Filled.Settings, Color(0xFF546E7A), Screen.Settings),
-    )
-    val profiles = remember { prefs.profiles }
-    var refresh by remember { mutableIntStateOf(0) }
-    val status by androidx.compose.runtime.produceState<HomeStatus?>(null, ip, refresh) {
-        value = null
-        value = if (ip.isBlank()) null else homeStatus(ip)
-    }
-    LazyVerticalGrid(
-        columns = GridCells.Fixed(2),
-        modifier = m.fillMaxSize(),
-        contentPadding = PaddingValues(16.dp),
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        item(span = { GridItemSpan(maxLineSpan) }) {
-            StatusCard(ip, status, profiles, setIp, onRefresh = { refresh++ }, onSettings = { go(Screen.Settings) })
-        }
-        items(tiles) { t ->
-            val off = t.needsIpp && status?.let { !it.ipp } == true
-            TileCard(t, off) { go(t.target) }
-        }
-    }
-}
-
-@Composable
-fun StatusCard(
-    ip: String, status: HomeStatus?, profiles: List<Profile>, setIp: (String) -> Unit,
-    onRefresh: () -> Unit, onSettings: () -> Unit,
-) {
-    Card(
-        Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.large,
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest),
-        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-    ) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (ip.isBlank()) {
-                FirstRun(setIp, onSettings)
-                return@Column
-            }
-            Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-                androidx.compose.foundation.layout.Box(
-                    Modifier.size(56.dp).background(MaterialTheme.colorScheme.primaryContainer, MaterialTheme.shapes.medium),
-                    contentAlignment = androidx.compose.ui.Alignment.Center,
-                ) { Icon(Icons.Filled.Print, null, tint = MaterialTheme.colorScheme.onPrimaryContainer, modifier = Modifier.size(32.dp)) }
-                androidx.compose.foundation.layout.Spacer(Modifier.size(12.dp))
-                val dot = when {
-                    status == null -> MaterialTheme.colorScheme.outline
-                    status.online -> Color(0xFF43A047)
-                    else -> MaterialTheme.colorScheme.error
-                }
-                androidx.compose.foundation.layout.Box(
-                    Modifier.size(12.dp).background(dot, androidx.compose.foundation.shape.CircleShape)
-                )
-                Column(Modifier.padding(start = 12.dp).weight(1f)) {
-                    Text(
-                        status?.model?.takeIf { it.isNotBlank() } ?: "Imprimante",
-                        style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold,
-                    )
-                    Text(
-                        "$ip · " + when {
-                            status == null -> "vérification…"
-                            status.online -> "en ligne"
-                            else -> "hors ligne"
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                IconButton(onClick = onRefresh) { Icon(Icons.Filled.Refresh, "Actualiser") }
-            }
-            if (status?.online == false) FindPrinter(ip, setIp)
-            if (profiles.size >= 2) {
-                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    profiles.forEach { p ->
-                        FilterChip(selected = p.ip == ip, onClick = { setIp(p.ip) }, label = { Text(p.name) })
-                    }
-                }
-            }
-        }
-    }
 }
 
 /** Premier démarrage : recherche automatique de l'imprimante sur le Wi-Fi, sinon saisie manuelle. */
@@ -391,38 +289,6 @@ fun FindPrinter(ip: String, setIp: (String) -> Unit) {
         }
     }
     if (msg.isNotEmpty()) Text(msg, style = MaterialTheme.typography.bodySmall)
-}
-
-@Composable
-fun TileCard(t: Tile, off: Boolean, onClick: () -> Unit) {
-    val accent = if (off) MaterialTheme.colorScheme.outline else t.color
-    Card(
-        onClick = onClick,
-        shape = MaterialTheme.shapes.large,
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest),
-        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-        modifier = Modifier.fillMaxWidth().aspectRatio(1.15f),
-    ) {
-        Column(
-            Modifier.fillMaxSize().padding(16.dp),
-            verticalArrangement = Arrangement.SpaceBetween,
-        ) {
-            androidx.compose.foundation.layout.Box(
-                Modifier.size(52.dp).background(accent.copy(alpha = 0.14f), MaterialTheme.shapes.medium),
-                contentAlignment = androidx.compose.ui.Alignment.Center,
-            ) { Icon(t.icon, null, tint = accent, modifier = Modifier.size(30.dp)) }
-            Column {
-                Text(
-                    t.label, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold,
-                    color = if (off) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface,
-                )
-                Text(
-                    if (off) "Non pris en charge" else t.sub,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall,
-                )
-            }
-        }
-    }
 }
 
 @Composable
@@ -533,251 +399,6 @@ fun ColorChips(color: Boolean, onColor: (Boolean) -> Unit) {
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         FilterChip(selected = color, onClick = { onColor(true) }, label = { Text("Couleur") })
         FilterChip(selected = !color, onClick = { onColor(false) }, label = { Text("Noir et blanc") })
-    }
-}
-
-// ---------- Impression ----------
-
-@Composable
-fun PrintScreen(m: Modifier, prefs: PrinterPrefs, ip: String, shared: Uri?, clearShared: () -> Unit) {
-    val ctx = LocalContext.current
-    val scope = rememberCoroutineScope()
-    var direct by remember { mutableStateOf(prefs.directPrint) }
-    var copies by remember { mutableIntStateOf(1) }
-    var color by remember { mutableStateOf(true) }
-    var duplex by remember { mutableStateOf(false) }
-    var reverse by remember { mutableStateOf(false) }
-    var busy by remember { mutableStateOf(false) }
-    var msg by remember { mutableStateOf("") }
-    var verso by remember { mutableStateOf<File?>(null) }
-    var opts by remember { mutableStateOf(printOptsOf(prefs.printOpts)) }
-    fun setOpts(o: PrintOpts) { opts = o; prefs.printOpts = o.save() }
-
-    var gpOn by remember { mutableStateOf(prefs.gpEnabled && Gutenprint.available) }
-    var gpSel by remember { mutableStateOf(prefs.gpSel) }
-    var gpChoices by remember { mutableStateOf<Map<String, List<Gutenprint.Choice>>>(emptyMap()) }
-    var gpErr by remember { mutableStateOf("") }
-    LaunchedEffect(gpOn, gpSel) {
-        if (!gpOn) return@LaunchedEffect
-        gpErr = try {
-            gpChoices = Gutenprint.PARAMS.associate { (p, _) -> p to Gutenprint.choices(ctx, p, gpSel) }
-            ""
-        } catch (e: Exception) { "Pilote intégré indisponible : ${e.message}" }
-    }
-
-    /** Pilote intégré : brouillon, N&B ou plusieurs pages par feuille passent d'abord par un PDF préparé. */
-    suspend fun driverPrint(uri: Uri, mime: String): String {
-        if (ip.isBlank()) throw IOException("adresse IP manquante")
-        val (u, m) = if (opts.quality == Quality.Draft || opts.nUp > 1 || !opts.color) {
-            withContext(Dispatchers.IO) { PrintPrep.prepare(ctx, uri, mime, opts) }.first.let { Uri.fromFile(it) to "application/pdf" }
-        } else uri to mime
-        val dpi = when (opts.quality) { Quality.Draft -> 150; Quality.Standard -> 200; Quality.High -> 300 }
-        val r = Gutenprint.print(ctx, ip, u, m, gpSel, opts.borderless, opts.fill, dpi) { msg = it }
-        markPrint(ctx)
-        return r
-    }
-
-    suspend fun output(uri: Uri, mime: String): String =
-        if (gpOn) {
-            try { driverPrint(uri, mime) } catch (e: Exception) {
-                "Pilote intégré : échec (${e.message}). " + androidPrintOpts(ctx, uri, mime, opts)
-            }
-        } else if (direct && ip.isNotBlank()) {
-            try {
-                directPrint(ctx, ip, uri, mime, copies, color)
-            } catch (e: Exception) {
-                "Impression directe refusée (${e.message}). " + androidPrintOpts(ctx, uri, mime, opts)
-            }
-        } else {
-            androidPrintOpts(ctx, uri, mime, opts)
-        }
-
-    fun go(uri: Uri) {
-        val mime = ctx.contentResolver.getType(uri) ?: "application/octet-stream"
-        scope.launch {
-            busy = true
-            msg = try {
-                if (duplex && mime == "application/pdf") {
-                    val (r, v) = withContext(Dispatchers.IO) {
-                        Images.splitPdf(ctx, uri, true, false) to Images.splitPdf(ctx, uri, false, reverse)
-                    }
-                    if (r == null) throw IOException("PDF illisible")
-                    val s = output(Uri.fromFile(r), "application/pdf")
-                    verso = v
-                    if (v == null) "$s Une seule page : pas de verso."
-                    else "$s Quand le recto est imprimé : retournez la pile, remettez-la dans le bac, puis « Imprimer le verso »."
-                } else {
-                    output(uri, mime)
-                }
-            } catch (e: Exception) {
-                "Échec : ${e.message}"
-            }
-            busy = false
-        }
-    }
-
-    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) go(uri)
-    }
-
-    /** Ouvre le fichier (préparé : format, brouillon, pages par feuille) dans l'appli Canon PRINT. */
-    fun toCanonPrint(uri: Uri) {
-        val mime = ctx.contentResolver.getType(uri) ?: "application/pdf"
-        scope.launch {
-            busy = true
-            msg = try {
-                val (u, m) = if (PrintPrep.needsPrep(mime, opts)) {
-                    val f = withContext(Dispatchers.IO) { PrintPrep.prepare(ctx, uri, mime, opts) }.first
-                    androidx.core.content.FileProvider.getUriForFile(ctx, "be.canonhub.files", f) to "application/pdf"
-                } else uri to mime
-                val i = Intent(Intent.ACTION_SEND).setType(m).putExtra(Intent.EXTRA_STREAM, u)
-                    .setPackage(CANON_PRINT).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                try {
-                    ctx.startActivity(i); "Ouvert dans Canon PRINT : type de papier et qualité s'y règlent et y restent mémorisés."
-                } catch (e: android.content.ActivityNotFoundException) {
-                    ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=$CANON_PRINT")))
-                    "Canon PRINT n'est pas installée : page du Play Store ouverte."
-                }
-            } catch (e: Exception) { "Échec : ${e.message}" }
-            busy = false
-        }
-    }
-    val canonPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) toCanonPrint(uri)
-    }
-
-    // Planche photos : format de case en cm (largeur × hauteur, portrait).
-    val sheetSizes = listOf("Identité 3,5×4,5" to (3.5f to 4.5f), "5×5" to (5f to 5f), "6×9" to (6f to 9f), "9×13" to (8.9f to 12.7f), "10×15" to (10.2f to 15.2f))
-    var sheet by remember { mutableIntStateOf(0) }
-    val photoPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri == null) return@rememberLauncherForActivityResult
-        scope.launch {
-            busy = true
-            msg = try {
-                val (w, h) = sheetSizes[sheet].second
-                val bmp = withContext(Dispatchers.IO) {
-                    val raw = ctx.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: throw IOException("fichier illisible")
-                    val b = Images.decode(raw, 3000) ?: throw IOException("image illisible")
-                    Images.photoSheet(b, w, h)
-                }
-                printBitmap(ctx, "planche", bmp)
-                "Planche prête. Au premier essai, mesurez une photo à la règle."
-            } catch (e: Exception) {
-                "Échec : ${e.message}"
-            }
-            busy = false
-        }
-    }
-
-    Column(m.padding(16.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        shared?.let { u ->
-            Section("Fichier reçu", Icons.Filled.Folder, sub = u.lastPathSegment ?: u.toString()) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(enabled = !busy, modifier = Modifier.weight(1f), onClick = { go(u) }) { Text("Imprimer") }
-                    OutlinedButton(enabled = !busy, modifier = Modifier.weight(1f), onClick = { toCanonPrint(u) }) { Text("Canon PRINT") }
-                    OutlinedButton(modifier = Modifier.weight(1f), onClick = clearShared) { Text("Ignorer") }
-                }
-            }
-        }
-        Section("Document", Icons.Filled.Print, sub = "PDF ou image depuis le téléphone") {
-            Button(enabled = !busy, onClick = { picker.launch(arrayOf("application/pdf", "image/*")) }, modifier = Modifier.fillMaxWidth()) {
-                Text(if (gpOn) "Choisir un fichier (pilote intégré)" else "Choisir un fichier")
-            }
-            OutlinedButton(enabled = !busy, onClick = { canonPicker.launch(arrayOf("application/pdf", "image/*")) }, modifier = Modifier.fillMaxWidth()) {
-                Text("Ouvrir dans Canon PRINT")
-            }
-            verso?.let { v ->
-                Button(
-                    enabled = !busy,
-                    modifier = Modifier.fillMaxWidth(),
-                    onClick = {
-                        scope.launch {
-                            busy = true
-                            msg = try { output(Uri.fromFile(v), "application/pdf") } catch (e: Exception) { "Échec : ${e.message}" }
-                            verso = null
-                            busy = false
-                        }
-                    },
-                ) { Text("Imprimer le verso") }
-            }
-            if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
-            if (msg.isNotEmpty()) {
-                androidx.compose.foundation.text.selection.SelectionContainer { Text(msg, style = MaterialTheme.typography.bodyMedium) }
-                val clip = androidx.compose.ui.platform.LocalClipboardManager.current
-                androidx.compose.material3.TextButton(onClick = {
-                    clip.setText(androidx.compose.ui.text.AnnotatedString(msg))
-                    android.widget.Toast.makeText(ctx, "Message copié", android.widget.Toast.LENGTH_SHORT).show()
-                }) { Text("Copier le message") }
-            }
-            Hint("Astuce : depuis Galerie ou Fichiers, « Partager » puis « Imprimer avec la Canon ».")
-        }
-        Section("Réglages d'impression", Icons.Filled.Settings, sub = "${opts.paper.label} · ${opts.quality.label} · ${if (opts.color) "Couleur" else "N&B"}") {
-            if (!gpOn) {
-                OptChips("Format", Paper.entries, opts.paper, { it.label }) { setOpts(opts.copy(paper = it)) }
-                OptChips("Type de papier", MediaType.entries, opts.type, { it.label }) { setOpts(opts.copy(type = it)) }
-            }
-            OptChips("Qualité", Quality.entries, opts.quality, { it.label }) { setOpts(opts.copy(quality = it)) }
-            if (opts.quality == Quality.Draft) Hint("Brouillon : couleurs éclaircies avant l'envoi, environ 40 % d'encre en moins.")
-            OptChips("Orientation", Orient.entries, opts.orient, { it.label }) { setOpts(opts.copy(orient = it)) }
-            OptChips("Pages par feuille", listOf(1, 2, 4), opts.nUp, { "$it" }) { setOpts(opts.copy(nUp = it)) }
-            ColorChips(opts.color) { setOpts(opts.copy(color = it)) }
-            Toggle("Sans bordure", opts.borderless) { setOpts(opts.copy(borderless = it)) }
-            Toggle("Remplir la page (photo recadrée)", opts.fill) { setOpts(opts.copy(fill = it)) }
-            Hint(if (gpOn) "Qualité de l'appli = finesse du rendu (brouillon : moins d'encre). Les réglages de l'imprimante sont dans « Pilote intégré »."
-                else "Format, orientation et couleur sont transmis. Type de papier et qualité se confirment dans la fenêtre Canon (Plus d'options), qui les mémorise ; ou utilisez « Ouvrir dans Canon PRINT ».")
-        }
-        Section("Pilote intégré (expérimental)", Icons.Filled.Print, sub = if (Gutenprint.available) "Gutenprint · sans service Canon" else "Absent de cette version") {
-            if (!Gutenprint.available) {
-                Hint("Le pilote Gutenprint n'a pas été compilé dans cet APK (étape CI « Gutenprint »).")
-            } else {
-                Toggle("Imprimer avec le pilote intégré", gpOn) { gpOn = it; prefs.gpEnabled = it }
-                if (gpOn) {
-                    if (gpErr.isNotEmpty()) Text(gpErr, color = MaterialTheme.colorScheme.error)
-                    Gutenprint.PARAMS.forEach { (p, label) ->
-                        val list = gpChoices[p].orEmpty()
-                        if (list.isNotEmpty()) {
-                            val cur = gpSel[p]?.takeIf { v -> list.any { it.name == v } } ?: (list.firstOrNull { it.default } ?: list.first()).name
-                            OptChips(label, list.map { it.name }, cur, { n -> list.first { it.name == n }.text }) {
-                                gpSel = gpSel + (p to it); prefs.gpSel = gpSel
-                            }
-                        }
-                    }
-                    Hint("Type de papier, qualité et sans bordure sont envoyés directement à l'imprimante (BJNP). Pilote libre Gutenprint, G3000 expérimentale : faites un essai sur papier ordinaire.")
-                }
-            }
-        }
-        Section("Planche photos", Icons.Filled.Face, sub = "Une photo répétée sur une feuille A4") {
-            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                sheetSizes.forEachIndexed { i, (label, _) ->
-                    FilterChip(selected = sheet == i, onClick = { sheet = i }, label = { Text(label) })
-                }
-            }
-            OutlinedButton(enabled = !busy, modifier = Modifier.fillMaxWidth(), onClick = { photoPicker.launch(arrayOf("image/*")) }) {
-                Text("Choisir la photo")
-            }
-            Hint("Photo recadrée au centre, traits de coupe gris. Papier photo A4 conseillé.")
-        }
-        Section("Mode d'envoi", Icons.Filled.Settings) {
-            Toggle("Impression directe (IPP, sans fenêtre Android)", direct) { direct = it; prefs.directPrint = it }
-            if (direct) {
-                Stepper("Copies", copies, 1..99) { copies = it }
-                ColorChips(color) { color = it }
-                Hint("Si l'imprimante refuse le format, la fenêtre Android s'ouvre automatiquement.")
-            } else {
-                Hint("La fenêtre Android règle copies, couleur et format.")
-            }
-        }
-        Section("Recto-verso manuel", Icons.Filled.ContentCopy, sub = "PDF : impaires puis paires") {
-            Toggle("Activer", duplex) { duplex = it }
-            if (duplex) {
-                Toggle("Verso en ordre inverse", reverse) { reverse = it }
-                Hint("Faites un essai sur 2 feuilles pour trouver le bon sens et l'ordre.")
-            }
-        }
-        OutlinedButton(
-            onClick = { ctx.startActivity(Intent(Settings.ACTION_PRINT_SETTINGS)) },
-            modifier = Modifier.fillMaxWidth(),
-        ) { Text("Service d'impression Android") }
     }
 }
 
@@ -917,13 +538,18 @@ fun ScanScreen(m: Modifier, ip: String) {
     }
 
     Column(m.padding(16.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Section("Numérisation", Icons.Filled.DocumentScanner) {
+        Hero(
+            "Numériser",
+            if (pages.isEmpty()) "${area.label} · $dpi dpi · ${if (color) "Couleur" else "Gris"}" else "${pages.size} page(s) prête(s)",
+            Icons.Filled.DocumentScanner, Brand.Scan,
+        )
+        Section("Numérisation", Icons.Filled.DocumentScanner, accent = Brand.Scan[0]) {
             ScanOptions(area, { area = it }, dpi, { dpi = it }, color, { color = it })
         }
-        Button(
-            enabled = !busy,
-            modifier = Modifier.fillMaxWidth(),
-            onClick = {
+        BigButton(
+            if (pages.isEmpty()) "Numériser" else "Ajouter une page (${pages.size + 1})",
+            Icons.Filled.DocumentScanner, Brand.Scan, busy = busy,
+        ) {
                 work("Numérisation en cours…") {
                     val b = ScanService.keep(ctx) { Escl.scan(ip, dpi, color, area) { progress = it } }
                     pages = pages + Page(b, dpi)
@@ -931,8 +557,7 @@ fun ScanScreen(m: Modifier, ip: String) {
                     PrinterPrefs(ctx).bump("scans")
                     "${pages.size} page(s) numérisée(s)."
                 }
-            },
-        ) { Text(if (pages.isEmpty()) "Numériser" else "Ajouter une page (${pages.size + 1})") }
+        }
         if (busy) {
             Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
                 if (progress > 0f) {
@@ -1198,184 +823,6 @@ fun PageStrip(pages: List<Page>, sel: Int, onSelect: (Int) -> Unit) {
                     th?.let { Image(it.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop) }
                 }
                 Text("${i + 1}", style = MaterialTheme.typography.labelSmall, color = if (on) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-        }
-    }
-}
-
-// ---------- Copie ----------
-
-@Composable
-fun CopyScreen(m: Modifier, prefs: PrinterPrefs, ip: String) {
-    val ctx = LocalContext.current
-    val scope = rememberCoroutineScope()
-    var area by remember { mutableStateOf(Area.A4) }
-    var dpi by remember { mutableIntStateOf(300) }
-    var color by remember { mutableStateOf(true) }
-    var copies by remember { mutableIntStateOf(1) }
-    var direct by remember { mutableStateOf(prefs.directPrint) }
-    var busy by remember { mutableStateOf(false) }
-    var msg by remember { mutableStateOf("") }
-    var front by remember { mutableStateOf<Bitmap?>(null) }
-    var out by remember { mutableStateOf(OutFmt()) }
-    var filt by remember { mutableStateOf(Filter.None) }
-    var batch by remember { mutableStateOf(prefs.copyBatch) }
-    var layout by remember { mutableStateOf(prefs.copyLayout) }
-    var queue by remember { mutableStateOf<List<CopyItem>>(emptyList()) }
-    var sel by remember { mutableIntStateOf(0) }
-
-    /** Une seule feuille : impression image (IPP direct possible). */
-    suspend fun printSheet(bmp: Bitmap): String = if (direct) {
-        try {
-            val data = withContext(Dispatchers.Default) { Images.jpeg(Calib.fixA4(bmp)) }
-            val id = Ipp.printDoc(ip, data, "image/jpeg", "Copie", copies, color)
-            markPrint(ctx)
-            "Copie envoyée (tâche $id)."
-        } catch (e: Exception) {
-            printBitmap(ctx, "copie", bmp)
-            "Impression directe refusée (${e.message}) : fenêtre Android ouverte."
-        }
-    } else {
-        printBitmap(ctx, "copie", bmp)
-        "Fenêtre d'impression ouverte : réglez le nombre de copies."
-    }
-
-    /** Met en page et imprime une liste de documents. */
-    suspend fun printAll(items: List<CopyItem>): String {
-        val f = File(ctx.cacheDir, "copie.pdf")
-        var first: Bitmap? = null
-        val n = withContext(Dispatchers.Default) {
-            val doc = android.graphics.pdf.PdfDocument()
-            var k = 0
-            CopyLayout.render(items, layout, out.target(), filt) { b ->
-                k++
-                if (k == 1) first = b
-                CopyLayout.addPdfPage(doc, b, k)
-                if (k > 1) b.recycle()
-            }
-            if (k > 1) f.outputStream().use { doc.writeTo(it) }
-            doc.close()
-            k
-        }
-        if (n == 0) throw IOException("rien à imprimer")
-        PrinterPrefs(ctx).bump("copies", items.size)
-        val docs = items.size
-        return if (n == 1) {
-            val r = printSheet(first!!)
-            if (docs > 1) "$docs documents sur 1 feuille. $r" else r
-        } else {
-            androidPrint(ctx, Uri.fromFile(f), "application/pdf")
-            markPrint(ctx)
-            "$docs document(s) sur $n feuilles : fenêtre d'impression ouverte."
-        }
-    }
-
-    suspend fun add(item: CopyItem): String =
-        if (batch) {
-            queue = queue + item; sel = queue.size - 1
-            "Ajouté au lot (${queue.size}). Posez le document suivant."
-        } else printAll(listOf(item))
-
-    Column(m.padding(16.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Section("Numérisation", Icons.Filled.ContentCopy) {
-            ScanOptions(area, { area = it; front = null }, dpi, { dpi = it }, color, { color = it }, cardLabel = "Carte ID R/V")
-        }
-        Section("Copie") {
-            Text("Mode", style = MaterialTheme.typography.labelLarge)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilterChip(selected = !batch, onClick = { batch = false; prefs.copyBatch = false }, label = { Text("Immédiate") })
-                FilterChip(selected = batch, onClick = { batch = true; prefs.copyBatch = true }, label = { Text("Par lot") })
-            }
-            Hint(if (batch) "Numérisez plusieurs documents, puis imprimez l'ensemble." else "Chaque document est imprimé juste après le scan.")
-            if (area != Area.Card) {
-                Text("Mise en page", style = MaterialTheme.typography.labelLarge)
-                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    PageLayout.entries.forEach { l ->
-                        FilterChip(selected = layout == l, onClick = { layout = l; prefs.copyLayout = l }, label = { Text(l.label) })
-                    }
-                }
-                Hint(
-                    when (layout) {
-                        PageLayout.One -> "Une feuille par document."
-                        PageLayout.Pack -> "Documents recadrés, à taille réelle, regroupés pour utiliser le moins de feuilles (tickets, cartes, petits formats)."
-                        PageLayout.Two -> "Deux documents réduits par feuille A4 (A5 chacun)."
-                    },
-                )
-                FormatPicker(out, { out = it })
-                if (out.fmt != Fmt.Original) Hint("Format imposé : une feuille par document, redressé et recadré.")
-            } else {
-                Hint("Recto et verso de la carte sur une seule feuille A4, taille réelle.")
-            }
-            Text("Filtre", style = MaterialTheme.typography.labelLarge)
-            FilterChips(filt) { filt = it }
-            if (filt == Filter.Doc || filt == Filter.BW) Hint("Fond blanchi : économise l'encre.")
-            Toggle("Impression directe (IPP)", direct) { direct = it; prefs.directPrint = it }
-            if (direct) Stepper("Copies", copies, 1..99) { copies = it }
-        }
-        Button(
-            enabled = !busy,
-            modifier = Modifier.fillMaxWidth(),
-            onClick = {
-                scope.launch {
-                    busy = true; msg = "Numérisation en cours…"
-                    msg = try {
-                        val b = ScanService.keep(ctx) { Escl.scan(ip, dpi, color, area) }
-                        val f = front
-                        if (area != Area.Card) {
-                            add(CopyItem(Page(b, dpi)))
-                        } else if (f == null) {
-                            front = withContext(Dispatchers.Default) { Images.decode(b, 3508) } ?: throw IOException("image illisible")
-                            "Recto lu. Retournez la carte au même endroit, puis appuyez à nouveau."
-                        } else {
-                            val sheet = withContext(Dispatchers.Default) {
-                                val back = Images.decode(b, 3508) ?: throw IOException("image illisible")
-                                Images.jpeg(Images.cardSheet(f, back), 92)
-                            }
-                            front = null
-                            add(CopyItem(Page(sheet, 300), sheet = true))
-                        }
-                    } catch (e: Exception) {
-                        "Échec : ${e.message}"
-                    }
-                    busy = false
-                }
-            },
-        ) {
-            Text(
-                when {
-                    busy -> "Patientez…"
-                    area == Area.Card && front == null -> "Lire le recto"
-                    area == Area.Card -> "Lire le verso"
-                    batch -> "Numériser et ajouter (${queue.size + 1})"
-                    else -> "Copier"
-                },
-            )
-        }
-        if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
-        if (msg.isNotEmpty()) Text(msg)
-        if (batch && queue.isNotEmpty()) {
-            Section("Lot en attente", sub = "${queue.size} document(s)") {
-                PageStrip(queue.map { it.page }, sel.coerceIn(0, queue.size - 1)) { sel = it }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(enabled = !busy, modifier = Modifier.weight(1f), onClick = {
-                        queue = queue.toMutableList().also { it.removeAt(sel.coerceIn(0, queue.size - 1)) }
-                        sel = (sel - 1).coerceAtLeast(0)
-                    }) { Text("Retirer") }
-                    OutlinedButton(enabled = !busy, modifier = Modifier.weight(1f), onClick = { queue = emptyList(); sel = 0 }) { Text("Vider") }
-                }
-                Button(enabled = !busy, modifier = Modifier.fillMaxWidth(), onClick = {
-                    scope.launch {
-                        busy = true; msg = "Mise en page…"
-                        msg = try {
-                            val r = printAll(queue)
-                            queue = emptyList(); sel = 0
-                            r
-                        } catch (e: Exception) {
-                            "Échec : ${e.message}"
-                        }
-                        busy = false
-                    }
-                }) { Text("Imprimer le lot") }
             }
         }
     }

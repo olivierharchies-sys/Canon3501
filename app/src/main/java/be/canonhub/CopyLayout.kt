@@ -115,9 +115,9 @@ object CopyLayout {
     }
 
     /** Écrit une feuille A4 dans un PDF (corrigée de l'échelle d'impression). */
-    fun addPdfPage(doc: PdfDocument, b: Bitmap, n: Int) {
+    fun addPdfPage(doc: PdfDocument, b: Bitmap, n: Int, fix: Boolean = true) {
         val pg = doc.startPage(PdfDocument.PageInfo.Builder(595, 842, n).create())
-        pg.canvas.drawBitmap(Calib.fixA4(b), null, RectF(0f, 0f, 595f, 842f), Paint(Paint.FILTER_BITMAP_FLAG))
+        pg.canvas.drawBitmap(if (fix) Calib.fixA4(b) else b, null, RectF(0f, 0f, 595f, 842f), Paint(Paint.FILTER_BITMAP_FLAG))
         doc.finishPage(pg)
     }
 }
