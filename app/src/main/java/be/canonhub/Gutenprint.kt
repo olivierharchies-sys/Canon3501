@@ -127,7 +127,11 @@ object Gutenprint {
                 }
             }
             withContext(Dispatchers.Main) { onStep("envoi à l'imprimante (${out.length() / 1024} Ko)…") }
-            Bjnp.send(ip, chunks(out), title = "CanonHub", timeout = 120_000)
+            // Gutenprint n'entoure pas le flux G3000 du XML Canon (début/fin de travail, passage en mode
+            // impression) : sans lui, la G3501 accepte les données mais n'imprime rien. On l'ajoute,
+            // comme pour les commandes d'entretien.
+            val job = listOf(CanonTools.XML_START, CanonTools.XML_MODE) + chunks(out) + listOf(CanonTools.XML_END)
+            Bjnp.send(ip, job, title = "CanonHub", timeout = 120_000)
             // Diagnostic : début du flux (XML Canon + commandes) et état de l'imprimante 3 s après.
             val head = out.inputStream().use { val b = ByteArray(600); val n = it.read(b); b.copyOf(maxOf(n, 0)) }
             val txt = head.map { val c = it.toInt() and 0xFF; if (c in 32..126) c.toChar() else if (c == 0x1B) '␛' else '·' }.joinToString("")

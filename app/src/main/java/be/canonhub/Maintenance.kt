@@ -57,13 +57,13 @@ object CanonTools {
     private const val NS = "http://www.canon.com/ns/cmd/2008/07/"
     private const val HEAD = "<?xml version=\"1.0\" encoding=\"utf-8\" ?>"
     private const val JOB = "00000001"
-    private val XML_START = ("$HEAD<cmd xmlns:ivec=\"${NS}common/\"><ivec:contents><ivec:operation>StartJob</ivec:operation>" +
+    internal val XML_START = ("$HEAD<cmd xmlns:ivec=\"${NS}common/\"><ivec:contents><ivec:operation>StartJob</ivec:operation>" +
         "<ivec:param_set servicetype=\"print\"><ivec:jobID>$JOB</ivec:jobID><ivec:bidi>0</ivec:bidi>" +
         "</ivec:param_set></ivec:contents></cmd>").toByteArray()
-    private val XML_MODE = ("$HEAD<cmd xmlns:ivec=\"${NS}common/\" xmlns:vcn=\"${NS}canon/\"><ivec:contents>" +
+    internal val XML_MODE = ("$HEAD<cmd xmlns:ivec=\"${NS}common/\" xmlns:vcn=\"${NS}canon/\"><ivec:contents>" +
         "<ivec:operation>VendorCmd</ivec:operation><ivec:param_set servicetype=\"print\"><ivec:jobID>$JOB</ivec:jobID>" +
         "<vcn:ijoperation>ModeShift</vcn:ijoperation><vcn:ijmode>1</vcn:ijmode></ivec:param_set></ivec:contents></cmd>").toByteArray()
-    private val XML_END = ("$HEAD<cmd xmlns:ivec=\"${NS}common/\"><ivec:contents><ivec:operation>EndJob</ivec:operation>" +
+    internal val XML_END = ("$HEAD<cmd xmlns:ivec=\"${NS}common/\"><ivec:contents><ivec:operation>EndJob</ivec:operation>" +
         "<ivec:param_set servicetype=\"print\"><ivec:jobID>$JOB</ivec:jobID></ivec:param_set></ivec:contents></cmd>").toByteArray()
     private val BJL_START = byteArrayOf(0x1B, 0x5B, 0x4B, 0x02, 0x00, 0x00, 0x1F) + "BJLSTART\n".toByteArray()
     private val BJL_END = "\nBJLEND\n".toByteArray()
