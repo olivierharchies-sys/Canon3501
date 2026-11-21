@@ -20,7 +20,8 @@ android {
     // Pilote Gutenprint (C) : compilé seulement si la CI a préparé app/src/main/cpp/gp.
     if (file("src/main/cpp/gp/lib/libgutenprint.a").exists()) {
         externalNativeBuild { cmake { path = file("src/main/cpp/CMakeLists.txt") } }
-        System.getenv("ANDROID_NDK_LATEST_HOME")?.let { ndkPath = it }
+        // Même NDK que celui qui a compilé Gutenprint ; le nom du dossier est son numéro de version.
+        System.getenv("ANDROID_NDK_LATEST_HOME")?.let { ndkPath = it; ndkVersion = file(it).name }
     }
 
     signingConfigs {
