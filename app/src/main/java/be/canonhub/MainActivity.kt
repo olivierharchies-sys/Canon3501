@@ -699,7 +699,14 @@ fun PrintScreen(m: Modifier, prefs: PrinterPrefs, ip: String, shared: Uri?, clea
                 ) { Text("Imprimer le verso") }
             }
             if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
-            if (msg.isNotEmpty()) Text(msg, style = MaterialTheme.typography.bodyMedium)
+            if (msg.isNotEmpty()) {
+                androidx.compose.foundation.text.selection.SelectionContainer { Text(msg, style = MaterialTheme.typography.bodyMedium) }
+                val clip = androidx.compose.ui.platform.LocalClipboardManager.current
+                androidx.compose.material3.TextButton(onClick = {
+                    clip.setText(androidx.compose.ui.text.AnnotatedString(msg))
+                    android.widget.Toast.makeText(ctx, "Message copié", android.widget.Toast.LENGTH_SHORT).show()
+                }) { Text("Copier le message") }
+            }
             Hint("Astuce : depuis Galerie ou Fichiers, « Partager » puis « Imprimer avec la Canon ».")
         }
         Section("Réglages d'impression", Icons.Filled.Settings, sub = "${opts.paper.label} · ${opts.quality.label} · ${if (opts.color) "Couleur" else "N&B"}") {

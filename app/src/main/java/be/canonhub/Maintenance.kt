@@ -201,12 +201,23 @@ object Bjnp {
                 val o = it.getOutputStream()
                 val i = java.io.DataInputStream(it.getInputStream())
                 for (data in parts) {
-                    o.write(header(TCP_PRINT, ++seq, session, data.size) + data); o.flush()
-                    val h = ByteArray(16).also { b -> i.readFully(b) }
-                    if (String(h, 0, 4) != "BJNP" || (h[5].toInt() and 0xFF) != TCP_PRINT) throw IOException("accusé BJNP invalide")
-                    val n = ByteBuffer.wrap(h, 12, 4).int
-                    val ack = ByteArray(n).also { b -> i.readFully(b) }
-                    if (n != 4 || ByteBuffer.wrap(ack).int != data.size) throw IOException("envoi BJNP non confirmé")
+                    // L'imprimante confirme le nombre d'octets acceptés : partiel ou nul quand sa mémoire
+                    // est pleine (impression en cours). On renvoie alors le reste, après une pause.
+                    var off = 0
+                    var idle = 0
+                    while (off < data.size) {
+                        val chunk = data.copyOfRange(off, minOf(data.size, off + 4096))
+                        o.write(header(TCP_PRINT, ++seq, session, chunk.size) + chunk); o.flush()
+                        val h = ByteArray(16).also { b -> i.readFully(b) }
+                        if (String(h, 0, 4) != "BJNP" || (h[5].toInt() and 0xFF) != TCP_PRINT) throw IOException("accusé BJNP invalide")
+                        val n = ByteBuffer.wrap(h, 12, 4).int
+                        val ack = ByteArray(n).also { b -> i.readFully(b) }
+                        val got = if (n >= 4) ByteBuffer.wrap(ack).int else 0
+                        if (got <= 0) {
+                            if (++idle > 120) throw IOException("imprimante n'accepte plus de données")
+                            Thread.sleep(500)
+                        } else { idle = 0; off += minOf(got, chunk.size) }
+                    }
                 }
             }
         } finally {
