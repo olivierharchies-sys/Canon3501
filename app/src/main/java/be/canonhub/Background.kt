@@ -196,3 +196,69 @@ class ScanTile : android.service.quicksettings.TileService() {
         }
     }
 }
+
+/**
+ * Service au premier plan pendant une numérisation : sans lui, Android (HyperOS surtout)
+ * coupe le réseau de l'appli dès qu'on passe à une autre appli (« connection abort »).
+ */
+class ScanService : android.app.Service() {
+    private var wake: android.os.PowerManager.WakeLock? = null
+    private var wifi: android.net.wifi.WifiManager.WifiLock? = null
+
+    override fun onBind(intent: Intent?): android.os.IBinder? = null
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val nm = getSystemService(NotificationManager::class.java)
+        nm.createNotificationChannel(NotificationChannel(CH, "Numérisation", NotificationManager.IMPORTANCE_LOW))
+        val n = NotificationCompat.Builder(this, CH)
+            .setSmallIcon(android.R.drawable.ic_menu_upload)
+            .setContentTitle("Numérisation en cours")
+            .setContentText("Vous pouvez changer d'appli.")
+            .setOngoing(true)
+            .setContentIntent(Notif.openApp(this, Screen.Scan, 9))
+            .build()
+        runCatching {
+            if (Build.VERSION.SDK_INT >= 29) {
+                startForeground(ID, n, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+            } else {
+                startForeground(ID, n)
+            }
+        }
+        if (wake == null) {
+            wake = getSystemService(android.os.PowerManager::class.java)
+                .newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "canonhub:scan")
+                .apply { acquire(10 * 60 * 1000L) }
+            @Suppress("DEPRECATION")
+            wifi = applicationContext.getSystemService(android.net.wifi.WifiManager::class.java)
+                .createWifiLock(android.net.wifi.WifiManager.WIFI_MODE_FULL_HIGH_PERF, "canonhub:scan")
+                .apply { setReferenceCounted(false); acquire() }
+        }
+        return START_NOT_STICKY
+    }
+
+    override fun onDestroy() {
+        runCatching { if (wake?.isHeld == true) wake?.release() }
+        runCatching { wifi?.release() }
+        super.onDestroy()
+    }
+
+    companion object {
+        private const val CH = "scan"
+        private const val ID = 7
+
+        /** Exécute [block] en gardant l'appli active (service au premier plan). */
+        suspend fun <T> keep(ctx: Context, block: suspend () -> T): T {
+            val i = Intent(ctx, ScanService::class.java)
+            val t0 = System.currentTimeMillis()
+            runCatching { ContextCompat.startForegroundService(ctx, i) }
+            try {
+                return block()
+            } finally {
+                // Laisse au service le temps de passer au premier plan avant l'arrêt (sinon plantage Android).
+                val dt = System.currentTimeMillis() - t0
+                if (dt < 1500) kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { kotlinx.coroutines.delay(1500 - dt) }
+                runCatching { ctx.stopService(i) }
+            }
+        }
+    }
+}

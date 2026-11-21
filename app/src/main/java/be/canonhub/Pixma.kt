@@ -192,8 +192,29 @@ object PixmaScan {
         this[0x23] = 2; this[0x24] = 1; this[0x30] = 1
     }
 
+    /**
+     * Numérise avec reprise : au réveil de l'imprimante, la 1re connexion est souvent coupée
+     * (« connection abort », pas de réponse). Jusqu'à 3 essais tant qu'aucune ligne n'est reçue.
+     */
+    suspend fun scan(ip: String, dpi: Int, color: Boolean, area: Area, progress: (Float) -> Unit = {}): ByteArray {
+        var attempt = 0
+        while (true) {
+            var got = false
+            try {
+                return scanOnce(ip, dpi, color, area) { got = true; progress(it) }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: IOException) {
+                val net = e is java.net.SocketException || e is java.net.SocketTimeoutException ||
+                    e.message?.let { "UDP" in it || "TCP" in it || "BJNP" in it } == true
+                if (got || !net || ++attempt >= 3) throw e
+                kotlinx.coroutines.delay(3000)
+            }
+        }
+    }
+
     /** Numérise une zone de la vitre (toujours en couleur, gris converti ensuite) et renvoie un JPEG. */
-    suspend fun scan(ip: String, dpi: Int, color: Boolean, area: Area, progress: (Float) -> Unit = {}): ByteArray = withContext(Dispatchers.IO) {
+    private suspend fun scanOnce(ip: String, dpi: Int, color: Boolean, area: Area, progress: (Float) -> Unit): ByteArray = withContext(Dispatchers.IO) {
         val outW = area.w * dpi / 300
         val rawW = (outW + 31) / 32 * 32
         val lines = area.h * dpi / 300
@@ -230,8 +251,10 @@ object PixmaScan {
             started = true
             var tries = 0
             while (true) {
+                // Sortie de veille : le scanner reste « occupé » pendant le réchauffage (jusqu'à ~1 min).
                 try { exec(l, START_SESSION); break } catch (e: Busy) {
-                    if (++tries > 10) throw IOException("scanner occupé")
+                    if (++tries > 60) throw IOException("scanner occupé (réessayez dans un instant)")
+                    ensureActive()
                     Thread.sleep(1000)
                 }
             }

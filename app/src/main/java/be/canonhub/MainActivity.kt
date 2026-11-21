@@ -779,7 +779,7 @@ fun ScanScreen(m: Modifier, ip: String) {
             modifier = Modifier.fillMaxWidth(),
             onClick = {
                 work("Numérisation en cours…") {
-                    val b = Escl.scan(ip, dpi, color, area) { progress = it }
+                    val b = ScanService.keep(ctx) { Escl.scan(ip, dpi, color, area) { progress = it } }
                     pages = pages + Page(b, dpi)
                     sel = pages.size - 1
                     PrinterPrefs(ctx).bump("scans")
@@ -1076,7 +1076,7 @@ fun CopyScreen(m: Modifier, prefs: PrinterPrefs, ip: String) {
                 scope.launch {
                     busy = true; msg = "Numérisation en cours…"
                     msg = try {
-                        val b = Escl.scan(ip, dpi, color, area)
+                        val b = ScanService.keep(ctx) { Escl.scan(ip, dpi, color, area) }
                         val bmp = withContext(Dispatchers.Default) { Images.decode(b, 3508) } ?: throw IOException("image illisible")
                         val f = front
                         if (area != Area.Card) {
