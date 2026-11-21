@@ -75,7 +75,15 @@ object Calib {
         val curve: List<Int> = emptyList(),
         val printOn: Boolean = false, val scanOn: Boolean = false, val copyOn: Boolean = false,
         val date: Long = 0L,
-    )
+        /** Matrice couleur 3×4 (lignes R, V, B : coef. r, v, b, décalage) pour les copies. */
+        val matrix: FloatArray = IDENT.copyOf(),
+        val colorOn: Boolean = false,
+    ) {
+        fun isDefault() = scaleX == 1f && scaleY == 1f && gains.all { it == 1f } && curve.isEmpty() &&
+            !printOn && !scanOn && !copyOn && !colorOn && matrix.contentEquals(IDENT) && date == 0L
+    }
+
+    val IDENT = floatArrayOf(1f, 0f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 0f, 1f, 0f)
 
     @Volatile var state = State()
         private set
@@ -84,6 +92,9 @@ object Calib {
         private set
     /** LUT appliquée aux copies (compense la courbe imprimante+scanner) ; null = aucune. */
     @Volatile var copyLut: IntArray? = null
+        private set
+    /** Matrice couleur des copies ; null = aucune. */
+    @Volatile var copyMatrix: FloatArray? = null
         private set
 
     fun load(ctx: Context) {
@@ -94,6 +105,8 @@ object Calib {
             p.getString("curve", "")!!.split(',').mapNotNull { it.toIntOrNull() },
             p.getBoolean("printOn", false), p.getBoolean("scanOn", false), p.getBoolean("copyOn", false),
             p.getLong("date", 0L),
+            p.getString("matrix", "")!!.split(',').mapNotNull { it.toFloatOrNull() }.takeIf { it.size == 12 }?.toFloatArray() ?: IDENT.copyOf(),
+            p.getBoolean("colorOn", false),
         )
         rebuild()
     }
@@ -105,6 +118,7 @@ object Calib {
             .putString("curve", s.curve.joinToString(","))
             .putBoolean("printOn", s.printOn).putBoolean("scanOn", s.scanOn).putBoolean("copyOn", s.copyOn)
             .putLong("date", s.date)
+            .putString("matrix", s.matrix.joinToString(",")).putBoolean("colorOn", s.colorOn)
             .apply()
         state = s
         rebuild()
@@ -118,6 +132,7 @@ object Calib {
             Array(3) { c -> IntArray(256) { v -> (v * s.gains[c]).roundToInt().coerceIn(0, 255) } }
         } else null
         copyLut = if (s.copyOn && s.curve.size == 11) curveLut(s.curve) else null
+        copyMatrix = if (s.colorOn && !s.matrix.contentEquals(IDENT)) s.matrix else null
     }
 
     /** Inverse de la réponse mesurée : valeur à imprimer pour retrouver le gris lu sur l'original. */
@@ -153,8 +168,72 @@ object Calib {
         return out
     }
 
-    /** Correction de copie (si activée). */
-    fun forCopy(b: Bitmap): Bitmap = copyLut?.let { applyLut(b, it) } ?: b
+    /** Correction de copie : courbe de gris puis matrice couleur (si activées). */
+    fun forCopy(b: Bitmap): Bitmap {
+        val lut = copyLut; val mx = copyMatrix
+        if (lut == null && mx == null) return b
+        val w = b.width; val h = b.height
+        val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val row = IntArray(w)
+        for (y in 0 until h) {
+            b.getPixels(row, 0, w, 0, y, w, 1)
+            for (x in 0 until w) {
+                val c = row[x]
+                var r = AColor.red(c); var g = AColor.green(c); var bl = AColor.blue(c)
+                if (lut != null) { r = lut[r]; g = lut[g]; bl = lut[bl] }
+                if (mx != null) {
+                    val r2 = mx[0] * r + mx[1] * g + mx[2] * bl + mx[3]
+                    val g2 = mx[4] * r + mx[5] * g + mx[6] * bl + mx[7]
+                    val b2 = mx[8] * r + mx[9] * g + mx[10] * bl + mx[11]
+                    r = r2.roundToInt().coerceIn(0, 255); g = g2.roundToInt().coerceIn(0, 255); bl = b2.roundToInt().coerceIn(0, 255)
+                }
+                row[x] = AColor.rgb(r, g, bl)
+            }
+            out.setPixels(row, 0, w, 0, y, w, 1)
+        }
+        return out
+    }
+
+    /**
+     * Ajuste une matrice 3×4 (moindres carrés régularisés vers l'identité) qui ramène
+     * les couleurs relues (après courbe de gris) vers les couleurs envoyées à l'imprimante.
+     */
+    private fun fitMatrix(meas: List<IntArray>, want: List<IntArray>, lut: IntArray): FloatArray {
+        val lam = 0.05 * meas.size * 255.0 * 255.0
+        val out = FloatArray(12)
+        for (ch in 0..2) {
+            val a = Array(4) { DoubleArray(4) }
+            val v = DoubleArray(4)
+            meas.forEachIndexed { i, m ->
+                val x = doubleArrayOf(lut[m[0]].toDouble(), lut[m[1]].toDouble(), lut[m[2]].toDouble(), 1.0)
+                val wgt = if (i >= 11) 3.0 else 1.0
+                for (r in 0..3) {
+                    v[r] += wgt * x[r] * want[i][ch]
+                    for (c in 0..3) a[r][c] += wgt * x[r] * x[c]
+                }
+            }
+            for (k in 0..2) { a[k][k] += lam; if (k == ch) v[k] += lam }
+            val sol = solve4(a, v) ?: doubleArrayOf(if (ch == 0) 1.0 else 0.0, if (ch == 1) 1.0 else 0.0, if (ch == 2) 1.0 else 0.0, 0.0)
+            for (k in 0..2) out[ch * 4 + k] = sol[k].toFloat().coerceIn(-1.5f, 2.5f)
+            out[ch * 4 + 3] = sol[3].toFloat().coerceIn(-80f, 80f)
+        }
+        return out
+    }
+
+    private fun solve4(a: Array<DoubleArray>, b: DoubleArray): DoubleArray? {
+        val n = 4
+        val m = Array(n) { i -> DoubleArray(n + 1) { j -> if (j < n) a[i][j] else b[i] } }
+        for (col in 0 until n) {
+            val piv = (col until n).maxBy { kotlin.math.abs(m[it][col]) }
+            if (kotlin.math.abs(m[piv][col]) < 1e-9) return null
+            val t = m[col]; m[col] = m[piv]; m[piv] = t
+            for (r in 0 until n) if (r != col) {
+                val f = m[r][col] / m[col][col]
+                for (c in col..n) m[r][c] -= f * m[col][c]
+            }
+        }
+        return DoubleArray(n) { m[it][n] / m[it][it] }
+    }
 
     /** Compense l'échelle d'impression mesurée sur une feuille A4 (centrée). */
     fun fixA4(b: Bitmap): Bitmap {
@@ -207,7 +286,11 @@ object Calib {
     data class Report(
         val scaleX: Float, val scaleY: Float, val white: IntArray, val gains: FloatArray,
         val curve: List<Int>, val warnings: List<String>,
+        val patchMeas: List<IntArray>, val matrix: FloatArray,
     )
+
+    val patchNames get() = patches
+    val patchRgb get() = patchColors
 
     private fun center(b: Bitmap, x: Float, y: Float, r: Int): IntArray {
         var sr = 0L; var sg = 0L; var sb = 0L; var n = 0
@@ -297,7 +380,12 @@ object Calib {
         weak("Magenta", (pc[1][0] + pc[1][2]) / 2 - pc[1][1] > 50)
         weak("Jaune", (pc[2][0] + pc[2][1]) / 2 - pc[2][2] > 50)
         if (white.max() - white.min() > 25) warn += "Blanc du papier teinté : la balance des blancs le corrige."
-        return Report(sx, sy, white, gains, curve, warn)
+        fun g(c: IntArray) = IntArray(3) { (c[it] * gains[it]).roundToInt().coerceIn(0, 255) }
+        val pcG = pc.map { g(it) }
+        val meas = raw.map { g(it) } + pcG
+        val want = ramp.map { intArrayOf(it, it, it) } + patchColors.map { intArrayOf(AColor.red(it), AColor.green(it), AColor.blue(it)) }
+        val mx = fitMatrix(meas, want, curveLut(curve))
+        return Report(sx, sy, white, gains, curve, warn, pcG, mx)
     }
 }
 
@@ -312,6 +400,22 @@ fun CalibScreen(m: Modifier, ip: String) {
     var report by remember { mutableStateOf<Calib.Report?>(null) }
     var sx by remember { mutableFloatStateOf(st.scaleX) }
     var sy by remember { mutableFloatStateOf(st.scaleY) }
+
+    var askReset by remember { mutableStateOf(false) }
+    if (askReset) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { askReset = false },
+            title = { Text("Réinitialiser l'étalonnage ?") },
+            text = { Text("Toutes les corrections mesurées ou réglées seront effacées. Vous pourrez refaire l'analyse de la mire.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    Calib.reset(ctx); st = Calib.state; sx = 1f; sy = 1f; report = null
+                    msg = "Étalonnage remis par défaut."; askReset = false
+                }) { Text("Réinitialiser") }
+            },
+            dismissButton = { TextButton(onClick = { askReset = false }) { Text("Annuler") } },
+        )
+    }
 
     fun commit(s: Calib.State) { Calib.save(ctx, s); st = s; sx = s.scaleX; sy = s.scaleY }
 
@@ -374,12 +478,23 @@ fun CalibScreen(m: Modifier, ip: String) {
                     }
                 }
                 Hint("Haut : attendu. Bas : mesuré.")
+                Text("Couleurs imprimées puis relues :", style = MaterialTheme.typography.labelLarge)
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    r.patchMeas.forEachIndexed { i, c ->
+                        Column(Modifier.weight(1f)) {
+                            Box(Modifier.fillMaxWidth().height(16.dp).background(Color(Calib.patchRgb[i])))
+                            Box(Modifier.fillMaxWidth().height(16.dp).background(Color(c[0], c[1], c[2])))
+                            Text(Calib.patchNames[i], style = MaterialTheme.typography.labelSmall)
+                        }
+                    }
+                }
                 r.warnings.forEach { Pill(it, MaterialTheme.colorScheme.error) }
                 Button(modifier = Modifier.fillMaxWidth(), onClick = {
                     commit(
                         Calib.State(
                             r.scaleX, r.scaleY, r.gains, r.curve,
                             printOn = true, scanOn = true, copyOn = true, date = System.currentTimeMillis(),
+                            matrix = r.matrix, colorOn = true,
                         ),
                     )
                     report = null; msg = "Étalonnage appliqué."
@@ -391,12 +506,19 @@ fun CalibScreen(m: Modifier, ip: String) {
             Toggle("Balance des blancs du scanner", st.scanOn) { commit(st.copy(scanOn = it)) }
             Toggle("Courbe de gris en copie", st.copyOn) { commit(st.copy(copyOn = it, curve = st.curve)) }
             if (st.copyOn && st.curve.size != 11) Hint("Courbe absente : faites l'analyse de la mire.")
+            Toggle("Couleurs en copie (automatique)", st.colorOn) { commit(st.copy(colorOn = it)) }
+            if (st.colorOn && st.matrix.contentEquals(Calib.IDENT)) Hint("Correction couleur absente : faites l'analyse de la mire.")
             Text("Échelle horizontale ${"%.1f".format(sx * 100)} %", style = MaterialTheme.typography.labelLarge)
             Slider(value = sx, onValueChange = { sx = it }, onValueChangeFinished = { commit(st.copy(scaleX = sx)) }, valueRange = 0.9f..1.05f)
             Text("Échelle verticale ${"%.1f".format(sy * 100)} %", style = MaterialTheme.typography.labelLarge)
             Slider(value = sy, onValueChange = { sy = it }, onValueChangeFinished = { commit(st.copy(scaleY = sy)) }, valueRange = 0.9f..1.05f)
             Hint("Réglage manuel : mesurez la ligne de 170 mm de la mire ; 165 mm → 97,1 %.")
-            TextButton(onClick = { Calib.reset(ctx); st = Calib.state; sx = 1f; sy = 1f; msg = "Étalonnage effacé." }) { Text("Tout réinitialiser") }
+        }
+        Section("Réglages par défaut", Icons.Filled.Settings, sub = "Efface toutes les corrections") {
+            Hint("Échelle 100 %, aucune balance des blancs, aucune courbe ni correction couleur.")
+            OutlinedButton(modifier = Modifier.fillMaxWidth(), enabled = !busy, onClick = { askReset = true }) {
+                Text("Réinitialiser l'étalonnage")
+            }
         }
     }
 }

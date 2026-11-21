@@ -474,6 +474,7 @@ fun SettingsScreen(m: Modifier, prefs: PrinterPrefs, ip: String, onSave: (String
     var clogDays by remember { mutableIntStateOf(prefs.clogDays) }
     var tree by remember { mutableStateOf(prefs.exportTree) }
     var autoClass by remember { mutableStateOf(prefs.autoClass) }
+    var calibSet by remember { mutableStateOf(!Calib.state.isDefault()) }
     val treePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { u ->
         if (u != null) {
             runCatching {
@@ -580,10 +581,15 @@ fun SettingsScreen(m: Modifier, prefs: PrinterPrefs, ip: String, onSave: (String
 
         Section(
             "Étalonnage", Icons.Filled.Build,
-            sub = if (Calib.state.date == 0L) "Non étalonné" else "Corrections actives",
+            sub = if (!calibSet) "Réglages par défaut" else "Corrections enregistrées",
             trailing = { TextButton(onClick = onCalib) { Text("Ouvrir") } },
         ) {
-            Hint("Imprime une mire, la relit au scanner et ajuste taille réelle, blancs et gris.")
+            Hint("Imprime une mire, la relit au scanner et ajuste taille réelle, blancs, gris et couleurs.")
+            if (calibSet) {
+                TextButton(onClick = { Calib.reset(ctx); calibSet = false; msg = "Étalonnage remis par défaut." }) {
+                    Text("Réinitialiser par défaut")
+                }
+            }
         }
 
         Section("Classement automatique", Icons.Filled.Bookmark, sub = "Type, dossier et nom proposés à l'enregistrement") {
