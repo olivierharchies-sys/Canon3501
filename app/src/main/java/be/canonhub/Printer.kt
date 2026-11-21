@@ -91,6 +91,19 @@ class PrinterPrefs(ctx: Context) {
         get() = sp.getString("exportTree", "") ?: ""
         set(v) = sp.edit().putString("exportTree", v).apply()
 
+    /** Classement automatique (type, dossier, nom) à l'enregistrement d'un scan. Désactivé par défaut. */
+    var autoClass: Boolean
+        get() = sp.getBoolean("autoClass", false)
+        set(v) = sp.edit().putBoolean("autoClass", v).apply()
+
+    /** Copie : false = impression juste après chaque scan ; true = lot imprimé ensuite. */
+    var copyBatch: Boolean
+        get() = sp.getBoolean("copyBatch", false)
+        set(v) = sp.edit().putBoolean("copyBatch", v).apply()
+    var copyLayout: PageLayout
+        get() = runCatching { PageLayout.valueOf(sp.getString("copyLayout", "One")!!) }.getOrDefault(PageLayout.One)
+        set(v) = sp.edit().putString("copyLayout", v.name).apply()
+
     /** Compteurs de l'appli : scans, prints, copies. */
     fun counter(k: String): Int = sp.getInt("n_$k", 0)
     fun bump(k: String, n: Int = 1) = sp.edit().putInt("n_$k", counter(k) + n).apply()

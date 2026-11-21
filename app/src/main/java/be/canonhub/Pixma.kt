@@ -228,11 +228,13 @@ object PixmaScan {
             pending.write(data, off, len)
             val buf = pending.toByteArray()
             var p = 0
+            val lut = Calib.scanLut
             while (buf.size - p >= lineBytes && y < lines) {
                 for (x in 0 until outW) {
-                    val r = buf[p + 3 * x].toInt() and 0xFF
-                    val g = buf[p + 3 * x + 1].toInt() and 0xFF
-                    val b = buf[p + 3 * x + 2].toInt() and 0xFF
+                    var r = buf[p + 3 * x].toInt() and 0xFF
+                    var g = buf[p + 3 * x + 1].toInt() and 0xFF
+                    var b = buf[p + 3 * x + 2].toInt() and 0xFF
+                    if (lut != null) { r = lut[0][r]; g = lut[1][g]; b = lut[2][b] }
                     row[x] = if (color) (0xFF shl 24) or (r shl 16) or (g shl 8) or b
                     else { val k = (r * 299 + g * 587 + b * 114) / 1000; (0xFF shl 24) or (k shl 16) or (k shl 8) or k }
                 }

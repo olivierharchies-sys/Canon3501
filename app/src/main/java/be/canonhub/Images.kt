@@ -259,12 +259,13 @@ object Images {
         doc.close()
     }
 
-    fun savePdf(ctx: Context, write: (java.io.OutputStream) -> Unit): Uri? = runCatching {
-        val name = "${stamp()}.pdf"
+    /** [folder] : sous-dossier de Canon (classement) ; [base] : nom sans extension. */
+    fun savePdf(ctx: Context, folder: String? = null, base: String? = null, write: (java.io.OutputStream) -> Unit): Uri? = runCatching {
+        val name = "${base?.takeIf { it.isNotBlank() } ?: stamp()}.pdf"
         val cv = ContentValues().apply {
             put(MediaStore.Downloads.DISPLAY_NAME, name)
             put(MediaStore.Downloads.MIME_TYPE, "application/pdf")
-            put(MediaStore.Downloads.RELATIVE_PATH, "Download/Canon")
+            put(MediaStore.Downloads.RELATIVE_PATH, "Download/Canon" + (folder?.let { "/$it" } ?: ""))
         }
         val uri = ctx.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, cv)!!
         ctx.contentResolver.openOutputStream(uri)!!.use(write)
@@ -272,12 +273,12 @@ object Images {
         uri
     }.getOrNull()
 
-    fun saveJpeg(ctx: Context, data: ByteArray): Uri? = runCatching {
-        val name = "${stamp()}.jpg"
+    fun saveJpeg(ctx: Context, data: ByteArray, folder: String? = null, base: String? = null): Uri? = runCatching {
+        val name = "${base?.takeIf { it.isNotBlank() } ?: stamp()}.jpg"
         val cv = ContentValues().apply {
             put(MediaStore.Images.Media.DISPLAY_NAME, name)
             put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-            put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/Canon")
+            put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/Canon" + (folder?.let { "/$it" } ?: ""))
         }
         val uri = ctx.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv)!!
         ctx.contentResolver.openOutputStream(uri)!!.use { it.write(data) }

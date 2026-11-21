@@ -105,6 +105,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         val prefs = PrinterPrefs(this)
         prefs.loadHints()
+        Calib.load(this)
         if (savedInstanceState == null) incoming.value = intent
         runCatching { WatchWorker.schedule(this) }
         setContent {
@@ -123,7 +124,7 @@ class MainActivity : ComponentActivity() {
 enum class Screen(val title: String) {
     Home("Canon G3000"), Print("Imprimer"), Scan("Numériser"), Copy("Copier"),
     Ink("Encre et état"), Maintenance("Entretien"), Queue("File d'attente"),
-    Info("Infos imprimante"), Settings("Réglages"), History("Documents")
+    Info("Infos imprimante"), Settings("Réglages"), History("Documents"), Calib("Étalonnage")
 }
 
 fun sharedUri(i: Intent): Uri? = when (i.action) {
@@ -137,7 +138,7 @@ fun App(prefs: PrinterPrefs, incoming: Intent?, consumed: () -> Unit) {
     var screen by remember { mutableStateOf(Screen.Home) }
     var ip by remember { mutableStateOf(prefs.ip) }
     var shared by remember { mutableStateOf<Uri?>(null) }
-    BackHandler(enabled = screen != Screen.Home) { screen = Screen.Home }
+    BackHandler(enabled = screen != Screen.Home) { screen = if (screen == Screen.Calib) Screen.Settings else Screen.Home }
 
     // Rappel d'entretien actif par défaut : demande l'autorisation des notifications une fois.
     val ctx0 = LocalContext.current
@@ -166,7 +167,7 @@ fun App(prefs: PrinterPrefs, incoming: Intent?, consumed: () -> Unit) {
             title = { Text(screen.title) },
             navigationIcon = {
                 if (screen != Screen.Home) {
-                    IconButton(onClick = { screen = Screen.Home }) {
+                    IconButton(onClick = { screen = if (screen == Screen.Calib) Screen.Settings else Screen.Home }) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, "Retour")
                     }
                 }
@@ -202,7 +203,8 @@ fun App(prefs: PrinterPrefs, incoming: Intent?, consumed: () -> Unit) {
             Screen.Maintenance -> MaintenanceScreen(m, prefs, ip, go)
             Screen.Queue -> if (ip.isBlank()) needIp() else QueueScreen(m, ip)
             Screen.Info -> if (ip.isBlank()) needIp() else InfoScreen(m, ip)
-            Screen.Settings -> SettingsScreen(m, prefs, ip, setIp)
+            Screen.Settings -> SettingsScreen(m, prefs, ip, setIp) { go(Screen.Calib) }
+            Screen.Calib -> CalibScreen(m, ip)
             Screen.History -> HistoryScreen(m)
         }
     }
@@ -453,7 +455,7 @@ fun printBitmap(ctx: Context, name: String, bmp: Bitmap) {
     PrintHelper(ctx).apply {
         scaleMode = PrintHelper.SCALE_MODE_FIT
         colorMode = PrintHelper.COLOR_MODE_COLOR
-    }.printBitmap(name, bmp)
+    }.printBitmap(name, Calib.fixA4(bmp))
     markPrint(ctx)
 }
 
@@ -708,6 +710,8 @@ fun ScanScreen(m: Modifier, ip: String) {
     var out by remember { mutableStateOf(OutFmt()) }
     var detected by remember { mutableStateOf<String?>(null) }
     var askInterleave by remember { mutableStateOf(false) }
+    val prefs0 = remember { PrinterPrefs(ctx) }
+    var plan by remember { mutableStateOf<SavePlan?>(null) }
     val target = out.target()
     val cur = pages.getOrNull(sel.coerceIn(0, (pages.size - 1).coerceAtLeast(0)))
 
@@ -753,21 +757,37 @@ fun ScanScreen(m: Modifier, ip: String) {
         }
     }
 
-    suspend fun pdfUri(): Uri = withContext(Dispatchers.IO) {
+    suspend fun pdfUri(folder: String? = null, base: String? = null): Uri = withContext(Dispatchers.IO) {
         val u = if (ocrPdf) {
             val done = pages.map { p ->
                 val b = proc(p, 2480) ?: throw IOException("image illisible")
                 b to runCatching { Ocr.read(b) }.getOrNull()
             }
-            Images.savePdf(ctx) { o -> Ocr.searchablePdf(done, target, o) }
+            Images.savePdf(ctx, folder, base) { o -> Ocr.searchablePdf(done, target, o) }
                 ?.also { OcrIndex.put(ctx, it, done.mapNotNull { d -> d.second?.text }.joinToString("\n")) }
         } else if (target != null) {
             val bm = pages.mapNotNull { full(it) }
-            Images.savePdf(ctx) { o -> Formats.pdf(bm, target, o) }
+            Images.savePdf(ctx, folder, base) { o -> Formats.pdf(bm, target, o) }
         } else {
-            Images.savePdf(ctx) { o -> Images.pdfFromScans(pages, o) { full(it) } }
+            Images.savePdf(ctx, folder, base) { o -> Images.pdfFromScans(pages, o) { full(it) } }
         }
         u ?: throw IOException("enregistrement impossible")
+    }
+
+    suspend fun saveJpegs(folder: String? = null, base: String? = null) = withContext(Dispatchers.IO) {
+        pages.forEachIndexed { i, p ->
+            full(p)?.let { b ->
+                val n = base?.let { if (pages.size > 1) "${it}_p${i + 1}" else it }
+                Images.saveJpeg(ctx, Images.jpeg(target?.let { t -> Formats.resize(b, t) } ?: b), folder, n)
+            }
+        }
+    }
+
+    /** Classement local : OCR de la 1re page sur le téléphone, puis mots-clés. */
+    suspend fun analyze(): Classify.Guess {
+        val b = withContext(Dispatchers.Default) { proc(pages[0], 2480) } ?: throw IOException("image illisible")
+        val txt = runCatching { Ocr.read(b).text }.getOrDefault("")
+        return Classify.guess(txt)
     }
 
     Column(m.padding(16.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -887,15 +907,12 @@ fun ScanScreen(m: Modifier, ip: String) {
                 Toggle("PDF avec texte cherchable (OCR)", ocrPdf) { ocrPdf = it }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(enabled = !busy, modifier = Modifier.weight(1f), onClick = {
-                        work(if (ocrPdf) "Création du PDF (OCR)…" else "Création du PDF…") { pdfUri(); "PDF enregistré (Documents)." }
+                        if (prefs0.autoClass) work("Analyse du document…") { plan = SavePlan(true, analyze()); "" }
+                        else work(if (ocrPdf) "Création du PDF (OCR)…" else "Création du PDF…") { pdfUri(); "PDF enregistré (Documents)." }
                     }) { Text("PDF") }
                     Button(enabled = !busy, modifier = Modifier.weight(1f), onClick = {
-                        work("Enregistrement…") {
-                            withContext(Dispatchers.IO) {
-                                pages.forEach { p -> full(p)?.let { b -> Images.saveJpeg(ctx, Images.jpeg(target?.let { t -> Formats.resize(b, t) } ?: b)) } }
-                            }
-                            "JPEG enregistré(s) (Documents)."
-                        }
+                        if (prefs0.autoClass) work("Analyse du document…") { plan = SavePlan(false, analyze()); "" }
+                        else work("Enregistrement…") { saveJpegs(); "JPEG enregistré(s) (Documents)." }
                     }) { Text("JPEG") }
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -938,6 +955,48 @@ fun ScanScreen(m: Modifier, ip: String) {
                 }) { Text("Extraire le texte (OCR)") }
             }
         }
+        plan?.let { pl ->
+            var type by remember(pl) { mutableStateOf(pl.guess.type) }
+            var name by remember(pl) { mutableStateOf(pl.guess.name()) }
+            androidx.compose.material3.AlertDialog(
+                onDismissRequest = { plan = null },
+                title = { Text("Classer le document") },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Hint("Type détecté sur le téléphone (aucun envoi en ligne). Modifiable.")
+                        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            DocType.entries.forEach { d ->
+                                FilterChip(selected = type == d, onClick = { type = d; name = pl.guess.name(d) }, label = { Text(d.label) })
+                            }
+                        }
+                        androidx.compose.material3.OutlinedTextField(
+                            name, { name = it }, singleLine = true, modifier = Modifier.fillMaxWidth(),
+                            label = { Text("Nom du fichier") },
+                        )
+                        Hint("Dossier : ${if (pl.pdf) "Téléchargements" else "Images"}/Canon/${type.folder}")
+                    }
+                },
+                confirmButton = {
+                    androidx.compose.material3.TextButton(onClick = {
+                        val f = type.folder; val n = Classify.clean(name)
+                        plan = null
+                        work("Enregistrement…") {
+                            if (pl.pdf) pdfUri(f, n) else saveJpegs(f, n)
+                            "Classé dans ${type.label} : $n"
+                        }
+                    }) { Text("Enregistrer") }
+                },
+                dismissButton = {
+                    androidx.compose.material3.TextButton(onClick = {
+                        plan = null
+                        work("Enregistrement…") {
+                            if (pl.pdf) pdfUri() else saveJpegs()
+                            "Enregistré sans classement."
+                        }
+                    }) { Text("Sans classer") }
+                },
+            )
+        }
         if (askInterleave) {
             androidx.compose.material3.AlertDialog(
                 onDismissRequest = { askInterleave = false },
@@ -978,6 +1037,9 @@ fun ScanScreen(m: Modifier, ip: String) {
         }
     }
 }
+
+/** Enregistrement en attente de validation du classement. */
+class SavePlan(val pdf: Boolean, val guess: Classify.Guess)
 
 /** Rectos (1re moitié) et versos (2e moitié) remis dans l'ordre r1, v1, r2, v2… */
 fun interleave(l: List<Page>, reverse: Boolean): List<Page> {
@@ -1031,43 +1093,98 @@ fun CopyScreen(m: Modifier, prefs: PrinterPrefs, ip: String) {
     var front by remember { mutableStateOf<Bitmap?>(null) }
     var out by remember { mutableStateOf(OutFmt()) }
     var filt by remember { mutableStateOf(Filter.None) }
+    var batch by remember { mutableStateOf(prefs.copyBatch) }
+    var layout by remember { mutableStateOf(prefs.copyLayout) }
+    var queue by remember { mutableStateOf<List<CopyItem>>(emptyList()) }
+    var sel by remember { mutableIntStateOf(0) }
 
-    suspend fun output0(src: Bitmap): String {
-        val bmp = withContext(Dispatchers.Default) { Images.applyFilter(src, filt) }
-        PrinterPrefs(ctx).bump("copies")
-        return if (direct) {
-            try {
-                val data = withContext(Dispatchers.Default) { Images.jpeg(bmp) }
-                val id = Ipp.printDoc(ip, data, "image/jpeg", "Copie", copies, color)
-                markPrint(ctx)
-                "Copie envoyée (tâche $id)."
-            } catch (e: Exception) {
-                printBitmap(ctx, "copie", bmp)
-                "Impression directe refusée (${e.message}) : fenêtre Android ouverte."
-            }
-        } else {
+    /** Une seule feuille : impression image (IPP direct possible). */
+    suspend fun printSheet(bmp: Bitmap): String = if (direct) {
+        try {
+            val data = withContext(Dispatchers.Default) { Images.jpeg(Calib.fixA4(bmp)) }
+            val id = Ipp.printDoc(ip, data, "image/jpeg", "Copie", copies, color)
+            markPrint(ctx)
+            "Copie envoyée (tâche $id)."
+        } catch (e: Exception) {
             printBitmap(ctx, "copie", bmp)
-            "Fenêtre d'impression ouverte : réglez le nombre de copies."
+            "Impression directe refusée (${e.message}) : fenêtre Android ouverte."
+        }
+    } else {
+        printBitmap(ctx, "copie", bmp)
+        "Fenêtre d'impression ouverte : réglez le nombre de copies."
+    }
+
+    /** Met en page et imprime une liste de documents. */
+    suspend fun printAll(items: List<CopyItem>): String {
+        val f = File(ctx.cacheDir, "copie.pdf")
+        var first: Bitmap? = null
+        val n = withContext(Dispatchers.Default) {
+            val doc = android.graphics.pdf.PdfDocument()
+            var k = 0
+            CopyLayout.render(items, layout, out.target(), filt) { b ->
+                k++
+                if (k == 1) first = b
+                CopyLayout.addPdfPage(doc, b, k)
+                if (k > 1) b.recycle()
+            }
+            if (k > 1) f.outputStream().use { doc.writeTo(it) }
+            doc.close()
+            k
+        }
+        if (n == 0) throw IOException("rien à imprimer")
+        PrinterPrefs(ctx).bump("copies", items.size)
+        val docs = items.size
+        return if (n == 1) {
+            val r = printSheet(first!!)
+            if (docs > 1) "$docs documents sur 1 feuille. $r" else r
+        } else {
+            androidPrint(ctx, Uri.fromFile(f), "application/pdf")
+            markPrint(ctx)
+            "$docs document(s) sur $n feuilles : fenêtre d'impression ouverte."
         }
     }
 
-    suspend fun output(src: Bitmap): String {
-        val t = out.target()
-        val bmp = if (t == null) src else withContext(Dispatchers.Default) { Formats.onA4(Images.autoCrop(Images.deskew(src)), t) }
-        return output0(bmp)
-    }
+    suspend fun add(item: CopyItem): String =
+        if (batch) {
+            queue = queue + item; sel = queue.size - 1
+            "Ajouté au lot (${queue.size}). Posez le document suivant."
+        } else printAll(listOf(item))
 
     Column(m.padding(16.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        ScanOptions(area, { area = it; front = null }, dpi, { dpi = it }, color, { color = it }, cardLabel = "Carte ID R/V")
-        Toggle("Impression directe (IPP)", direct) { direct = it; prefs.directPrint = it }
-        if (direct) Stepper("Copies", copies, 1..99) { copies = it }
-        Text("Filtre", style = MaterialTheme.typography.labelLarge)
-        FilterChips(filt) { filt = it }
-        if (filt == Filter.Doc || filt == Filter.BW) Hint("Fond blanchi : économise l'encre.")
-        if (area == Area.Card) Text("Recto et verso de la carte sur une seule feuille A4, taille réelle.")
-        else FormatPicker(out, { out = it })
-        if (area != Area.Card && out.fmt != Fmt.Original) {
-            Text("Le document est redressé, recadré puis imprimé à la taille choisie (repère en haut à gauche).", style = MaterialTheme.typography.bodySmall)
+        Section("Numérisation", Icons.Filled.ContentCopy) {
+            ScanOptions(area, { area = it; front = null }, dpi, { dpi = it }, color, { color = it }, cardLabel = "Carte ID R/V")
+        }
+        Section("Copie") {
+            Text("Mode", style = MaterialTheme.typography.labelLarge)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(selected = !batch, onClick = { batch = false; prefs.copyBatch = false }, label = { Text("Immédiate") })
+                FilterChip(selected = batch, onClick = { batch = true; prefs.copyBatch = true }, label = { Text("Par lot") })
+            }
+            Hint(if (batch) "Numérisez plusieurs documents, puis imprimez l'ensemble." else "Chaque document est imprimé juste après le scan.")
+            if (area != Area.Card) {
+                Text("Mise en page", style = MaterialTheme.typography.labelLarge)
+                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    PageLayout.entries.forEach { l ->
+                        FilterChip(selected = layout == l, onClick = { layout = l; prefs.copyLayout = l }, label = { Text(l.label) })
+                    }
+                }
+                Hint(
+                    when (layout) {
+                        PageLayout.One -> "Une feuille par document."
+                        PageLayout.Pack -> "Documents recadrés, à taille réelle, regroupés pour utiliser le moins de feuilles (tickets, cartes, petits formats)."
+                        PageLayout.Two -> "Deux documents réduits par feuille A4 (A5 chacun)."
+                    },
+                )
+                FormatPicker(out, { out = it })
+                if (out.fmt != Fmt.Original) Hint("Format imposé : une feuille par document, redressé et recadré.")
+            } else {
+                Hint("Recto et verso de la carte sur une seule feuille A4, taille réelle.")
+            }
+            Text("Filtre", style = MaterialTheme.typography.labelLarge)
+            FilterChips(filt) { filt = it }
+            if (filt == Filter.Doc || filt == Filter.BW) Hint("Fond blanchi : économise l'encre.")
+            Toggle("Impression directe (IPP)", direct) { direct = it; prefs.directPrint = it }
+            if (direct) Stepper("Copies", copies, 1..99) { copies = it }
         }
         Button(
             enabled = !busy,
@@ -1077,17 +1194,19 @@ fun CopyScreen(m: Modifier, prefs: PrinterPrefs, ip: String) {
                     busy = true; msg = "Numérisation en cours…"
                     msg = try {
                         val b = ScanService.keep(ctx) { Escl.scan(ip, dpi, color, area) }
-                        val bmp = withContext(Dispatchers.Default) { Images.decode(b, 3508) } ?: throw IOException("image illisible")
                         val f = front
                         if (area != Area.Card) {
-                            output(bmp)
+                            add(CopyItem(Page(b, dpi)))
                         } else if (f == null) {
-                            front = bmp
+                            front = withContext(Dispatchers.Default) { Images.decode(b, 3508) } ?: throw IOException("image illisible")
                             "Recto lu. Retournez la carte au même endroit, puis appuyez à nouveau."
                         } else {
-                            val sheet = withContext(Dispatchers.Default) { Images.cardSheet(f, bmp) }
+                            val sheet = withContext(Dispatchers.Default) {
+                                val back = Images.decode(b, 3508) ?: throw IOException("image illisible")
+                                Images.jpeg(Images.cardSheet(f, back), 92)
+                            }
                             front = null
-                            output0(sheet)
+                            add(CopyItem(Page(sheet, 300), sheet = true))
                         }
                     } catch (e: Exception) {
                         "Échec : ${e.message}"
@@ -1099,13 +1218,39 @@ fun CopyScreen(m: Modifier, prefs: PrinterPrefs, ip: String) {
             Text(
                 when {
                     busy -> "Patientez…"
-                    area != Area.Card -> "Copier"
-                    front == null -> "Lire le recto"
-                    else -> "Lire le verso et copier"
+                    area == Area.Card && front == null -> "Lire le recto"
+                    area == Area.Card -> "Lire le verso"
+                    batch -> "Numériser et ajouter (${queue.size + 1})"
+                    else -> "Copier"
                 },
             )
         }
         if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
         if (msg.isNotEmpty()) Text(msg)
+        if (batch && queue.isNotEmpty()) {
+            Section("Lot en attente", sub = "${queue.size} document(s)") {
+                PageStrip(queue.map { it.page }, sel.coerceIn(0, queue.size - 1)) { sel = it }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(enabled = !busy, modifier = Modifier.weight(1f), onClick = {
+                        queue = queue.toMutableList().also { it.removeAt(sel.coerceIn(0, queue.size - 1)) }
+                        sel = (sel - 1).coerceAtLeast(0)
+                    }) { Text("Retirer") }
+                    OutlinedButton(enabled = !busy, modifier = Modifier.weight(1f), onClick = { queue = emptyList(); sel = 0 }) { Text("Vider") }
+                }
+                Button(enabled = !busy, modifier = Modifier.fillMaxWidth(), onClick = {
+                    scope.launch {
+                        busy = true; msg = "Mise en page…"
+                        msg = try {
+                            val r = printAll(queue)
+                            queue = emptyList(); sel = 0
+                            r
+                        } catch (e: Exception) {
+                            "Échec : ${e.message}"
+                        }
+                        busy = false
+                    }
+                }) { Text("Imprimer le lot") }
+            }
+        }
     }
 }

@@ -458,7 +458,7 @@ fun AppCounters() {
 // ---------- Réglages ----------
 
 @Composable
-fun SettingsScreen(m: Modifier, prefs: PrinterPrefs, ip: String, onSave: (String) -> Unit) {
+fun SettingsScreen(m: Modifier, prefs: PrinterPrefs, ip: String, onSave: (String) -> Unit, onCalib: () -> Unit = {}) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     var text by remember { mutableStateOf(ip) }
@@ -473,6 +473,7 @@ fun SettingsScreen(m: Modifier, prefs: PrinterPrefs, ip: String, onSave: (String
     var clog by remember { mutableStateOf(prefs.clogReminder) }
     var clogDays by remember { mutableIntStateOf(prefs.clogDays) }
     var tree by remember { mutableStateOf(prefs.exportTree) }
+    var autoClass by remember { mutableStateOf(prefs.autoClass) }
     val treePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { u ->
         if (u != null) {
             runCatching {
@@ -575,6 +576,19 @@ fun SettingsScreen(m: Modifier, prefs: PrinterPrefs, ip: String, onSave: (String
                     TextButton(onClick = { prefs.removeProfile(p.ip); profiles = prefs.profiles }) { Text("Suppr.") }
                 }
             }
+        }
+
+        Section(
+            "Étalonnage", Icons.Filled.Build,
+            sub = if (Calib.state.date == 0L) "Non étalonné" else "Corrections actives",
+            trailing = { TextButton(onClick = onCalib) { Text("Ouvrir") } },
+        ) {
+            Hint("Imprime une mire, la relit au scanner et ajuste taille réelle, blancs et gris.")
+        }
+
+        Section("Classement automatique", Icons.Filled.Bookmark, sub = "Type, dossier et nom proposés à l'enregistrement") {
+            Toggle("Activer", autoClass) { autoClass = it; prefs.autoClass = it }
+            Hint("Analyse sur le téléphone (OCR ML Kit + mots-clés), sans IA en ligne. Vous validez ou corrigez avant chaque enregistrement.")
         }
 
         Section("Copie automatique", Icons.Filled.Bookmark, sub = if (tree.isBlank()) "Désactivée" else "Vers : ${Export.label(tree)}") {
