@@ -128,7 +128,12 @@ object Gutenprint {
             }
             withContext(Dispatchers.Main) { onStep("envoi à l'imprimante (${out.length() / 1024} Ko)…") }
             Bjnp.send(ip, chunks(out), title = "CanonHub", timeout = 120_000)
-            "Envoyé à l'imprimante par le pilote intégré (${out.length() / 1024} Ko)."
+            // Diagnostic : début du flux (XML Canon + commandes) et état de l'imprimante 3 s après.
+            val head = out.inputStream().use { val b = ByteArray(600); val n = it.read(b); b.copyOf(maxOf(n, 0)) }
+            val txt = head.map { val c = it.toInt() and 0xFF; if (c in 32..126) c.toChar() else if (c == 0x1B) '␛' else '·' }.joinToString("")
+            Thread.sleep(3000)
+            val st = runCatching { Bjnp.readable(Bjnp.status(ip)) }.getOrElse { "illisible" }
+            "Envoyé à l'imprimante par le pilote intégré (${out.length() / 1024} Ko).\nÉtat : $st\nDébut du flux : $txt"
         } finally {
             out.delete()
         }
