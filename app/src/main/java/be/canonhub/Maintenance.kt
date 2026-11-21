@@ -307,6 +307,9 @@ object ToolWatch {
 object Rui {
     private val cookies = mutableMapOf<String, String>()
     private var sbid = ""
+    private var lastCode = 0
+    private var lastLoc = ""
+    private var loginInfo = ""
 
     private fun tag(x: String, n: String): String? = Regex("<$n>([^<]*)</$n>").find(x)?.groupValues?.get(1)
 
@@ -320,6 +323,7 @@ object Rui {
                 c.outputStream.use { it.write(body.toByteArray()) }
             }
             val code = c.responseCode
+            lastCode = code; lastLoc = c.getHeaderField("Location").orEmpty()
             c.headerFields.filterKeys { it != null && it.equals("Set-Cookie", true) }.values.flatten().forEach {
                 val kv = it.substringBefore(';')
                 if ('=' in kv) cookies[kv.substringBefore('=').trim()] = kv.substringAfter('=').trim()
@@ -332,16 +336,40 @@ object Rui {
 
     private fun needLogin(x: String) = "SES_ERR_URL" in x || tag(x, "RESULT") == "LOCKED"
 
+    private fun findSbid(page: String): String =
+        Regex("""id=["']SBID["'][^>]*value=["']([^"']*)""").find(page)?.groupValues?.get(1)
+            ?: Regex("""value=["']([^"']*)["'][^>]*id=["']SBID""").find(page)?.groupValues?.get(1)
+            ?: Regex("""SBID["']?\s*[:=]\s*["']([^"']+)""").find(page)?.groupValues?.get(1) ?: ""
+
+    /** Page suivante : en-tête Location ou balise meta refresh. */
+    private fun next(page: String): String? {
+        val u = lastLoc.ifEmpty { Regex("""url=([^"'>\s]+)""", RegexOption.IGNORE_CASE).find(page)?.groupValues?.get(1).orEmpty() }
+        return u.ifEmpty { null }?.let { it.substringAfter("/rui/", it.substringAfterLast('/')) }
+    }
+
     private fun login(ip: String, pwd: String) {
-        if (pwd.isBlank()) throw IOException("mot de passe administrateur requis (Réglages)")
+        if (pwd.isBlank()) throw IOException("mot de passe administrateur requis")
         if (!pwd.matches(Regex("[0-9A-Za-z]{4,32}"))) throw IOException("mot de passe : 4 à 32 lettres ou chiffres")
         val hash = java.security.MessageDigest.getInstance("SHA-256").digest(pwd.toByteArray())
             .joinToString("") { "%02x".format(it) }
         cookies.clear(); sbid = ""
-        req(ip, "sendpw.cgi", "NAMAE=$hash&IDTYPE=2")
-        val page = runCatching { req(ip, "index.html", null) }.getOrDefault("")
-        sbid = Regex("""id=["']SBID["'][^>]*value=["']([^"']*)""").find(page)?.groupValues?.get(1)
-            ?: Regex("""value=["']([^"']*)["'][^>]*id=["']SBID""").find(page)?.groupValues?.get(1) ?: ""
+        var page = req(ip, "sendpw.cgi", "NAMAE=$hash&IDTYPE=2")
+        val trace = mutableListOf("sendpw $lastCode")
+        sbid = findSbid(page)
+        var hops = 0
+        while (sbid.isEmpty() && hops++ < 3) {
+            val n = next(page) ?: break
+            page = runCatching { req(ip, n, null) }.getOrDefault("")
+            trace += "$n $lastCode"
+            sbid = findSbid(page)
+        }
+        for (p in listOf("index.html", "utility.html")) {
+            if (sbid.isNotEmpty()) break
+            page = runCatching { req(ip, p, null) }.getOrDefault("")
+            trace += "$p $lastCode"
+            sbid = findSbid(page)
+        }
+        loginInfo = trace.joinToString(" → ") + " · cookies ${cookies.keys} · SBID " + (if (sbid.isEmpty()) "absent" else "ok")
     }
 
     /** Lance l'outil ; renvoie le numéro de travail. */
@@ -353,7 +381,7 @@ object Rui {
             "RW_OK", "RW_POLLING" -> tag(r, "JOB_NUM") ?: "0"
             "RW_NG" -> throw IOException("refusé par l'imprimante (${tag(r, "DETAIL") ?: "occupée ou en erreur"})")
             "LOCKED" -> throw IOException("mot de passe administrateur refusé")
-            else -> throw IOException("réponse inattendue : ${r.take(150)}")
+            else -> throw IOException("réponse inattendue : ${tag(r, "RESULT") ?: r.take(150)}\nConnexion : $loginInfo")
         }
     }
 
