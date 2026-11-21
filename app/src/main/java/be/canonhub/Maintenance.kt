@@ -353,8 +353,10 @@ object Rui {
         val hash = java.security.MessageDigest.getInstance("SHA-256").digest(pwd.toByteArray())
             .joinToString("") { "%02x".format(it) }
         cookies.clear(); sbid = ""
+        runCatching { req(ip, "logon_manager.html", null) }   // cookie de session initial, comme le navigateur
+        val trace = mutableListOf("logon $lastCode")
         var page = req(ip, "sendpw.cgi", "NAMAE=$hash&IDTYPE=2")
-        val trace = mutableListOf("sendpw $lastCode")
+        trace += "sendpw $lastCode"
         sbid = findSbid(page)
         var hops = 0
         while (sbid.isEmpty() && hops++ < 3) {
