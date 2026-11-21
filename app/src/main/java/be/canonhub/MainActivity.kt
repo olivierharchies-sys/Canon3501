@@ -105,14 +105,7 @@ class MainActivity : ComponentActivity() {
         if (savedInstanceState == null) incoming.value = intent
         runCatching { WatchWorker.schedule(this) }
         setContent {
-            val dark = isSystemInDarkTheme()
-            val ctx = LocalContext.current
-            val scheme = when {
-                Build.VERSION.SDK_INT >= 31 -> if (dark) dynamicDarkColorScheme(ctx) else dynamicLightColorScheme(ctx)
-                dark -> darkColorScheme()
-                else -> lightColorScheme()
-            }
-            MaterialTheme(colorScheme = scheme) {
+            AppTheme {
                 App(prefs, incoming.value) { incoming.value = null }
             }
         }
@@ -150,7 +143,9 @@ fun App(prefs: PrinterPrefs, incoming: Intent?, consumed: () -> Unit) {
         consumed()
     }
 
-    Scaffold(topBar = {
+    val snack = remember { androidx.compose.material3.SnackbarHostState() }
+    androidx.compose.runtime.CompositionLocalProvider(LocalSnack provides snack) {
+    Scaffold(snackbarHost = { androidx.compose.material3.SnackbarHost(snack) }, topBar = {
         TopAppBar(
             title = { Text(screen.title) },
             navigationIcon = {
@@ -194,6 +189,7 @@ fun App(prefs: PrinterPrefs, incoming: Intent?, consumed: () -> Unit) {
             Screen.Settings -> SettingsScreen(m, prefs, ip, setIp)
             Screen.History -> HistoryScreen(m)
         }
+    }
     }
 }
 
@@ -256,7 +252,11 @@ fun StatusCard(
     ip: String, status: HomeStatus?, profiles: List<Profile>, setIp: (String) -> Unit,
     onRefresh: () -> Unit, onSettings: () -> Unit,
 ) {
-    ElevatedCard(Modifier.fillMaxWidth()) {
+    Card(
+        Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.large,
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest),
+        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+    ) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             if (ip.isBlank()) {
                 Text("Aucune imprimante configurée", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
@@ -264,6 +264,11 @@ fun StatusCard(
                 return@Column
             }
             Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                androidx.compose.foundation.layout.Box(
+                    Modifier.size(56.dp).background(MaterialTheme.colorScheme.primaryContainer, MaterialTheme.shapes.medium),
+                    contentAlignment = androidx.compose.ui.Alignment.Center,
+                ) { Icon(Icons.Filled.Print, null, tint = MaterialTheme.colorScheme.onPrimaryContainer, modifier = Modifier.size(32.dp)) }
+                androidx.compose.foundation.layout.Spacer(Modifier.size(12.dp))
                 val dot = when {
                     status == null -> MaterialTheme.colorScheme.outline
                     status.online -> Color(0xFF43A047)
@@ -308,19 +313,21 @@ fun FindPrinter(ip: String, setIp: (String) -> Unit) {
     val scope = rememberCoroutineScope()
     var busy by remember { mutableStateOf(false) }
     var msg by remember { mutableStateOf("") }
+    suspend fun search() {
+        busy = true; msg = "Recherche sur le Wi-Fi…"
+        val found = runCatching { Discovery.search(ctx, 6) }.getOrDefault(emptyList())
+            .filter { it.ip != ip && (it.name.contains("Canon", true) || it.services.any { s -> s.txt["mfg"].orEmpty().contains("Canon", true) }) }
+        msg = if (found.isEmpty()) "Aucune Canon trouvée. Imprimante allumée et sur le même Wi-Fi ?" else ""
+        if (found.isNotEmpty()) {
+            android.widget.Toast.makeText(ctx, "Imprimante retrouvée : ${found[0].ip}", android.widget.Toast.LENGTH_LONG).show()
+            setIp(found[0].ip)
+        }
+        busy = false
+    }
+    // Recherche automatique dès que l'imprimante est vue hors ligne.
+    LaunchedEffect(ip) { search() }
     Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-        OutlinedButton(enabled = !busy, onClick = {
-            scope.launch {
-                busy = true; msg = "Recherche sur le Wi-Fi…"
-                val found = runCatching { Discovery.search(ctx, 6) }.getOrDefault(emptyList())
-                    .filter { it.ip != ip && (it.name.contains("Canon", true) || it.services.any { s -> s.txt["mfg"].orEmpty().contains("Canon", true) }) }
-                msg = when (found.size) {
-                    0 -> "Aucune Canon trouvée. Imprimante allumée et sur le même Wi-Fi ?"
-                    else -> { setIp(found[0].ip); "Nouvelle adresse : ${found[0].ip}" }
-                }
-                busy = false
-            }
-        }) {
+        OutlinedButton(enabled = !busy, onClick = { scope.launch { search() } }) {
             Icon(Icons.Filled.Search, null, Modifier.size(18.dp))
             Text(" Retrouver l'imprimante")
         }
@@ -330,27 +337,30 @@ fun FindPrinter(ip: String, setIp: (String) -> Unit) {
 
 @Composable
 fun TileCard(t: Tile, off: Boolean, onClick: () -> Unit) {
-    val bg = if (off) MaterialTheme.colorScheme.surfaceVariant else t.color
-    val fg = if (off) MaterialTheme.colorScheme.onSurfaceVariant else Color.White
+    val accent = if (off) MaterialTheme.colorScheme.outline else t.color
     Card(
         onClick = onClick,
-        shape = androidx.compose.foundation.shape.RoundedCornerShape(24.dp),
-        colors = CardDefaults.cardColors(containerColor = bg),
-        modifier = Modifier.fillMaxWidth().aspectRatio(1.1f),
+        shape = MaterialTheme.shapes.large,
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest),
+        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        modifier = Modifier.fillMaxWidth().aspectRatio(1.15f),
     ) {
         Column(
             Modifier.fillMaxSize().padding(16.dp),
             verticalArrangement = Arrangement.SpaceBetween,
         ) {
             androidx.compose.foundation.layout.Box(
-                Modifier.size(48.dp).background(fg.copy(alpha = 0.18f), androidx.compose.foundation.shape.CircleShape),
+                Modifier.size(52.dp).background(accent.copy(alpha = 0.14f), MaterialTheme.shapes.medium),
                 contentAlignment = androidx.compose.ui.Alignment.Center,
-            ) { Icon(t.icon, null, tint = fg, modifier = Modifier.size(28.dp)) }
+            ) { Icon(t.icon, null, tint = accent, modifier = Modifier.size(30.dp)) }
             Column {
-                Text(t.label, color = fg, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                 Text(
-                    if (off) "Non pris en charge (IPP absent)" else t.sub,
-                    color = fg.copy(alpha = 0.85f), style = MaterialTheme.typography.bodySmall,
+                    t.label, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold,
+                    color = if (off) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface,
+                )
+                Text(
+                    if (off) "Non pris en charge" else t.sub,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall,
                 )
             }
         }
@@ -603,25 +613,42 @@ fun ScanScreen(m: Modifier, ip: String) {
     var job by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     var ocrPdf by remember { mutableStateOf(false) }
     var ocrText by remember { mutableStateOf<String?>(null) }
+    var out by remember { mutableStateOf(OutFmt()) }
+    var dpis by remember { mutableStateOf<List<Int>>(emptyList()) }
+    var detected by remember { mutableStateOf<String?>(null) }
+    val target = out.target()
 
     LaunchedEffect(pages.lastOrNull(), crop, bright, contrast) {
         val last = pages.lastOrNull()
-        preview = if (last == null) null else withContext(Dispatchers.Default) { Images.process(last, 1200, crop, bright, contrast) }
+        withContext(Dispatchers.Default) {
+            val dec = last?.let { Images.decode(it, 1200) }
+            preview = if (last == null) null else Images.process(last, 1200, crop, bright, contrast)
+            val pv = preview
+            detected = if (last == null || dec == null || pv == null) null else {
+                val (w, h) = Formats.physical(last, dpis.lastOrNull() ?: 300, pv, dec.width)
+                Formats.detect(w, h)
+            }
+        }
     }
 
     fun full(b: ByteArray) = Images.process(b, 3508, crop, bright, contrast)
 
+    /** Page prête à imprimer : A4 avec l'image à la taille choisie. */
+    fun printable(b: Bitmap): Bitmap = target?.let { Formats.onA4(b, it) } ?: b
+
+    val snack = LocalSnack.current
     fun work(label: String, block: suspend () -> String) {
         job = scope.launch {
             busy = true; msg = label; progress = 0f
-            msg = try {
+            val r = try {
                 block()
             } catch (e: kotlinx.coroutines.CancellationException) {
                 "Annulé."
             } catch (e: Exception) {
                 "Échec : ${e.message}"
             }
-            busy = false; job = null
+            busy = false; job = null; msg = ""
+            if (r.isNotEmpty()) scope.launch { snack.showSnackbar(r) }
         }
     }
 
@@ -631,9 +658,12 @@ fun ScanScreen(m: Modifier, ip: String) {
                 val b = Images.process(p, 2480, crop, bright, contrast) ?: throw IOException("image illisible")
                 b to runCatching { Ocr.read(b) }.getOrNull()
             }
-            Images.savePdf(ctx) { out -> Ocr.searchablePdf(done, out) }
+            Images.savePdf(ctx) { o -> Ocr.searchablePdf(done, target, o) }
+        } else if (target != null) {
+            val bm = pages.mapNotNull { full(it) }
+            Images.savePdf(ctx) { o -> Formats.pdf(bm, target, o) }
         } else {
-            Images.savePdf(ctx) { out -> Images.pdfFromScans(pages, out) { full(it) } }
+            Images.savePdf(ctx) { o -> Images.pdfFromScans(pages, o) { full(it) } }
         }
         u ?: throw IOException("enregistrement impossible")
     }
@@ -646,6 +676,7 @@ fun ScanScreen(m: Modifier, ip: String) {
             onClick = {
                 work("Numérisation en cours…") {
                     val b = Escl.scan(ip, dpi, color, area) { progress = it }
+                    dpis = dpis + dpi
                     pages = pages + listOf(b)
                     "${pages.size} page(s) numérisée(s)."
                 }
@@ -662,22 +693,42 @@ fun ScanScreen(m: Modifier, ip: String) {
                 androidx.compose.material3.TextButton(onClick = { job?.cancel() }) { Text("Annuler") }
             }
         }
-        if (msg.isNotEmpty()) Text(msg)
+        if (busy && msg.isNotEmpty()) Text(msg, style = MaterialTheme.typography.bodySmall)
         if (pages.isEmpty() && !busy) {
-            Text(
-                "Posez le document face contre la vitre, coin repère en haut à gauche. 75 dpi = aperçu rapide.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            Column(
+                Modifier.fillMaxWidth().padding(vertical = 24.dp),
+                horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                androidx.compose.foundation.layout.Box(
+                    Modifier.size(96.dp).background(MaterialTheme.colorScheme.primaryContainer, androidx.compose.foundation.shape.CircleShape),
+                    contentAlignment = androidx.compose.ui.Alignment.Center,
+                ) { Icon(Icons.Filled.DocumentScanner, null, tint = MaterialTheme.colorScheme.onPrimaryContainer, modifier = Modifier.size(48.dp)) }
+                Text("Prêt à numériser", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                Text(
+                    "Document face contre la vitre, coin repère en haut à gauche.\n75 dpi = aperçu rapide.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                )
+            }
         }
 
         if (pages.isNotEmpty()) {
-            Toggle("Recadrage automatique", crop) { crop = it }
+            Toggle("Redresser et recadrer le document", crop) { crop = it }
+            FormatPicker(out, { out = it }, detected)
             Text("Luminosité ${bright.toInt()}")
             Slider(value = bright, onValueChange = { bright = it }, valueRange = -80f..80f)
             Text("Contraste ${"%.1f".format(contrast)}")
             Slider(value = contrast, onValueChange = { contrast = it }, valueRange = 0.5f..2f)
-            preview?.let { Image(it.asImageBitmap(), "Aperçu", Modifier.fillMaxWidth()) }
+            preview?.let {
+                Card(
+                    shape = MaterialTheme.shapes.large,
+                    border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Image(it.asImageBitmap(), "Aperçu", Modifier.fillMaxWidth()) }
+            }
+            PageStrip(pages)
             Text("${pages.size} page(s). Les réglages s'appliquent à toutes les pages.", style = MaterialTheme.typography.bodySmall)
             Toggle("PDF avec texte cherchable (OCR)", ocrPdf) { ocrPdf = it }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -687,7 +738,7 @@ fun ScanScreen(m: Modifier, ip: String) {
                 Button(enabled = !busy, onClick = {
                     work("Enregistrement…") {
                         withContext(Dispatchers.IO) {
-                            pages.forEach { p -> full(p)?.let { Images.saveJpeg(ctx, Images.jpeg(it)) } }
+                            pages.forEach { p -> full(p)?.let { b -> Images.saveJpeg(ctx, Images.jpeg(target?.let { t -> Formats.resize(b, t) } ?: b)) } }
                         }
                         "JPEG enregistré(s) (Historique)."
                     }
@@ -695,11 +746,11 @@ fun ScanScreen(m: Modifier, ip: String) {
                 OutlinedButton(enabled = !busy, onClick = {
                     work("Préparation…") {
                         if (pages.size == 1) {
-                            val b = withContext(Dispatchers.Default) { full(pages[0]) } ?: throw IOException("image illisible")
+                            val b = withContext(Dispatchers.Default) { full(pages[0])?.let { printable(it) } } ?: throw IOException("image illisible")
                             printBitmap(ctx, "scan", b)
                         } else {
                             val f = File(ctx.cacheDir, "scan.pdf")
-                            withContext(Dispatchers.IO) { f.outputStream().use { o -> Images.pdfFromScans(pages, o) { full(it) } } }
+                            withContext(Dispatchers.IO) { f.outputStream().use { o -> Images.pdfFromScans(pages, o) { full(it)?.let { b -> printable(b) } } } }
                             androidPrint(ctx, Uri.fromFile(f), "application/pdf")
                         }
                         "Fenêtre d'impression ouverte."
@@ -710,7 +761,7 @@ fun ScanScreen(m: Modifier, ip: String) {
                 OutlinedButton(enabled = !busy, onClick = {
                     work("Préparation…") {
                         if (pages.size == 1) {
-                            val u = withContext(Dispatchers.IO) { full(pages[0])?.let { Images.saveJpeg(ctx, Images.jpeg(it)) } }
+                            val u = withContext(Dispatchers.IO) { full(pages[0])?.let { b -> Images.saveJpeg(ctx, Images.jpeg(target?.let { t -> Formats.resize(b, t) } ?: b)) } }
                                 ?: throw IOException("enregistrement impossible")
                             share(ctx, u, "image/jpeg")
                         } else {
@@ -719,8 +770,8 @@ fun ScanScreen(m: Modifier, ip: String) {
                         ""
                     }
                 }) { Text("Partager") }
-                OutlinedButton(enabled = !busy, onClick = { pages = pages.dropLast(1); msg = "" }) { Text("Suppr. dernière") }
-                OutlinedButton(enabled = !busy, onClick = { pages = emptyList(); msg = "" }) { Text("Effacer") }
+                OutlinedButton(enabled = !busy, onClick = { pages = pages.dropLast(1); dpis = dpis.dropLast(1); msg = "" }) { Text("Suppr. dernière") }
+                OutlinedButton(enabled = !busy, onClick = { pages = emptyList(); dpis = emptyList(); msg = "" }) { Text("Effacer") }
             }
             OutlinedButton(enabled = !busy, modifier = Modifier.fillMaxWidth(), onClick = {
                 work("Lecture du texte…") {
@@ -760,6 +811,25 @@ fun ScanScreen(m: Modifier, ip: String) {
     }
 }
 
+/** Vignettes des pages numérisées. */
+@Composable
+fun PageStrip(pages: List<ByteArray>) {
+    if (pages.size < 2) return
+    androidx.compose.foundation.lazy.LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        items(pages.size) { i ->
+            val th by androidx.compose.runtime.produceState<Bitmap?>(null, pages[i]) {
+                value = withContext(Dispatchers.Default) { Images.decode(pages[i], 240) }
+            }
+            Column(horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally) {
+                Card(shape = MaterialTheme.shapes.small, modifier = Modifier.size(64.dp, 88.dp)) {
+                    th?.let { Image(it.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop) }
+                }
+                Text("${i + 1}", style = MaterialTheme.typography.labelSmall)
+            }
+        }
+    }
+}
+
 // ---------- Copie ----------
 
 @Composable
@@ -774,8 +844,9 @@ fun CopyScreen(m: Modifier, prefs: PrinterPrefs, ip: String) {
     var busy by remember { mutableStateOf(false) }
     var msg by remember { mutableStateOf("") }
     var front by remember { mutableStateOf<Bitmap?>(null) }
+    var out by remember { mutableStateOf(OutFmt()) }
 
-    suspend fun output(bmp: Bitmap): String =
+    suspend fun output0(bmp: Bitmap): String =
         if (direct) {
             try {
                 val data = withContext(Dispatchers.Default) { Images.jpeg(bmp) }
@@ -791,11 +862,21 @@ fun CopyScreen(m: Modifier, prefs: PrinterPrefs, ip: String) {
             "Fenêtre d'impression ouverte : réglez le nombre de copies."
         }
 
+    suspend fun output(src: Bitmap): String {
+        val t = out.target()
+        val bmp = if (t == null) src else withContext(Dispatchers.Default) { Formats.onA4(Images.autoCrop(Images.deskew(src)), t) }
+        return output0(bmp)
+    }
+
     Column(m.padding(16.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         ScanOptions(area, { area = it; front = null }, dpi, { dpi = it }, color, { color = it }, cardLabel = "Carte ID R/V")
         Toggle("Impression directe (IPP)", direct) { direct = it; prefs.directPrint = it }
         if (direct) Stepper("Copies", copies, 1..99) { copies = it }
         if (area == Area.Card) Text("Recto et verso de la carte sur une seule feuille A4, taille réelle.")
+        else FormatPicker(out, { out = it })
+        if (area != Area.Card && out.fmt != Fmt.Original) {
+            Text("Le document est redressé, recadré puis imprimé à la taille choisie (repère en haut à gauche).", style = MaterialTheme.typography.bodySmall)
+        }
         Button(
             enabled = !busy,
             modifier = Modifier.fillMaxWidth(),
@@ -814,7 +895,7 @@ fun CopyScreen(m: Modifier, prefs: PrinterPrefs, ip: String) {
                         } else {
                             val sheet = withContext(Dispatchers.Default) { Images.cardSheet(f, bmp) }
                             front = null
-                            output(sheet)
+                            output0(sheet)
                         }
                     } catch (e: Exception) {
                         "Échec : ${e.message}"

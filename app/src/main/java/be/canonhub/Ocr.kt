@@ -26,15 +26,17 @@ object Ocr {
     }
 
     /** PDF A4 : image visible + calque de texte invisible (copiable, cherchable). */
-    fun searchablePdf(pages: List<Pair<Bitmap, Text?>>, out: OutputStream) {
+    fun searchablePdf(pages: List<Pair<Bitmap, Text?>>, t: Pair<Float, Float>?, out: OutputStream) {
         val doc = PdfDocument()
         val ink = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(1, 255, 255, 255) }
-        pages.forEachIndexed { i, (b, t) ->
-            val p = doc.startPage(PdfDocument.PageInfo.Builder(595, 842, i + 1).create())
-            val sc = minOf(595f / b.width, 842f / b.height)
-            val ox = (595f - b.width * sc) / 2
+        pages.forEachIndexed { i, (b, tx) ->
+            val (wCm, hCm) = if (t == null) 21f to 29.7f else Formats.fit(b.width, b.height, t)
+            val pw = (wCm * 72f / 2.54f).toInt(); val ph = (hCm * 72f / 2.54f).toInt()
+            val p = doc.startPage(PdfDocument.PageInfo.Builder(pw, ph, i + 1).create())
+            val sc = minOf(pw.toFloat() / b.width, ph.toFloat() / b.height)
+            val ox = (pw - b.width * sc) / 2
             p.canvas.drawBitmap(b, null, RectF(ox, 0f, ox + b.width * sc, b.height * sc), Paint(Paint.FILTER_BITMAP_FLAG))
-            t?.textBlocks?.forEach { blk ->
+            tx?.textBlocks?.forEach { blk ->
                 blk.lines.forEach { ln ->
                     val r = ln.boundingBox ?: return@forEach
                     val h = r.height() * sc

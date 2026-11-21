@@ -79,9 +79,65 @@ object Images {
         return Bitmap.createBitmap(src, rect.left, rect.top, rect.width(), rect.height())
     }
 
+    /** Angle d'inclinaison (degrés) par profil de projection des pixels sombres ; 0 si incertain. */
+    fun skewAngle(src: Bitmap): Float {
+        val sw = 500
+        val k = src.width.toFloat() / sw
+        val sh = (src.height / k).toInt().coerceAtLeast(1)
+        val small = Bitmap.createScaledBitmap(src, sw, sh, true)
+        val px = IntArray(sw * sh)
+        small.getPixels(px, 0, sw, 0, 0, sw, sh)
+        val xs = ArrayList<Int>(); val ys = ArrayList<Int>()
+        for (y in 0 until sh) for (x in 0 until sw) {
+            val c = px[y * sw + x]
+            if ((AColor.red(c) + AColor.green(c) + AColor.blue(c)) / 3 < 140) { xs += x; ys += y }
+        }
+        if (xs.size < 300) return 0f
+        val step = maxOf(1, xs.size / 30000)
+        fun score(deg: Float): Double {
+            val r = Math.toRadians(deg.toDouble())
+            val cs = kotlin.math.cos(r); val sn = kotlin.math.sin(r)
+            val off = sw
+            val hist = IntArray(sh + 2 * sw)
+            var i = 0
+            while (i < xs.size) {
+                val yy = (ys[i] * cs - xs[i] * sn).toInt() + off
+                if (yy in hist.indices) hist[yy]++
+                i += step
+            }
+            var sum = 0.0
+            for (v in hist) sum += v.toDouble() * v
+            return sum
+        }
+        val base = score(0f)
+        var best = 0f; var bestS = base
+        var a = -6f
+        while (a <= 6f) {
+            val sc = score(a)
+            if (sc > bestS) { bestS = sc; best = a }
+            a += 0.25f
+        }
+        return if (kotlin.math.abs(best) >= 0.3f && bestS > base * 1.1) best else 0f
+    }
+
+    /** Redresse un document posé de travers (fond blanc). */
+    fun deskew(src: Bitmap): Bitmap {
+        val a = skewAngle(src)
+        if (a == 0f) return src
+        val m = android.graphics.Matrix().apply { setRotate(a) }
+        val r = RectF(0f, 0f, src.width.toFloat(), src.height.toFloat())
+        m.mapRect(r)
+        val out = Bitmap.createBitmap(r.width().toInt(), r.height().toInt(), Bitmap.Config.ARGB_8888)
+        val c = Canvas(out)
+        c.drawColor(AColor.WHITE)
+        m.postTranslate(-r.left, -r.top)
+        c.drawBitmap(src, m, Paint(Paint.FILTER_BITMAP_FLAG))
+        return out
+    }
+
     fun process(bytes: ByteArray, maxDim: Int, crop: Boolean, bright: Float, contrast: Float): Bitmap? {
         var b = decode(bytes, maxDim) ?: return null
-        if (crop) b = autoCrop(b)
+        if (crop) b = autoCrop(deskew(b))
         return adjust(b, bright, contrast)
     }
 
