@@ -62,7 +62,10 @@ object CanonTools {
     private val BJL_START = byteArrayOf(0x1B, 0x5B, 0x4B, 0x02, 0x00, 0x00, 0x1F) + "BJLSTART\n".toByteArray()
     private val BJL_END = "\nBJLEND\n".toByteArray()
 
-    fun payload(t: Tool): ByteArray = XML_START + XML_MODE + BJL_START + t.bjl.toByteArray() + BJL_END + XML_END
+    /** Une trame par commande, comme les écritures séparées de cmdtocanonij2. */
+    fun parts(t: Tool): List<ByteArray> = listOf(XML_START, XML_MODE, BJL_START + t.bjl.toByteArray() + BJL_END, XML_END)
+
+    fun payload(t: Tool): ByteArray = parts(t).reduce { a, b -> a + b }
 
     /** Envoie la commande ; renvoie le transport qui l'a acceptée. */
     suspend fun run(ip: String, t: Tool, mode: Transport): String = withContext(Dispatchers.IO) {
@@ -73,7 +76,7 @@ object CanonTools {
             try {
                 when (tr) {
                     Transport.Lpd -> Lpd.send(ip, data, "Maintenance")
-                    Transport.Bjnp -> Bjnp.send(ip, data)
+                    Transport.Bjnp -> Bjnp.send(ip, parts(t))
                     Transport.Raw -> raw(ip, data)
                     Transport.Ipp -> Ipp.printRaw(ip, data)
                     Transport.Auto -> Unit
@@ -141,10 +144,20 @@ object Bjnp {
     fun status(ip: String): String {
         val r = udp(ip, 0x20, 1, 0, ByteArray(0))
         if (r.size < 16 || String(r, 0, 4) != "BJNP") throw IOException("réponse BJNP invalide")
-        if (r.size <= 18) return ""
-        val len = u16(r, 16)
-        val end = if (len in 3..(r.size - 16)) 16 + len else r.size
-        return String(r, 18, end - 18, Charsets.ISO_8859_1).filter { it >= ' ' }.trim()
+        val t = String(r, 16, r.size - 16, Charsets.ISO_8859_1)
+        val i = t.indexOf('<')
+        return (if (i >= 0) t.substring(i) else t).filter { it >= ' ' }.trim()
+    }
+
+    /** Réponse XML GetStatusResponse : <ivec:status> (idle, printing…) et champs Canon (BST, DJS…). */
+    fun tag(xml: String, name: String): String =
+        Regex("<$name>(.*?)</$name>").find(xml)?.groupValues?.get(1).orEmpty()
+
+    fun readable(xml: String): String {
+        val st = tag(xml, "ivec:status").ifEmpty { "?" }
+        val det = tag(xml, "ivec:status_detail")
+        val f = tag(xml, "cijn:ReadData").split(';').associate { it.substringBefore(':') to it.substringAfter(':', "") }
+        return listOfNotNull(st, det.ifEmpty { null }, f["BST"]?.let { "BST $it" }, f["DJS"]?.let { "DJS $it" }).joinToString(" · ")
     }
 
     /** Champs lisibles de l'identifiant (MFG, MDL, CMD…). */
@@ -155,7 +168,7 @@ object Bjnp {
     }
 
     /** Comme Pixma.Link : numéros de message dès 0, connexion TCP en 3 essais, accusé de réception vérifié. */
-    fun send(ip: String, data: ByteArray) {
+    fun send(ip: String, parts: List<ByteArray>) {
         var seq = 0
         val details = ByteArray(8) + field("android", 64) + field("canonhub", 64) + field("Maintenance", 256)
         val r = udp(ip, JOB_DETAILS, seq, 0, details)
@@ -175,12 +188,14 @@ object Bjnp {
                 it.tcpNoDelay = true
                 val o = it.getOutputStream()
                 val i = java.io.DataInputStream(it.getInputStream())
-                o.write(header(TCP_PRINT, ++seq, session, data.size) + data); o.flush()
-                val h = ByteArray(16).also { b -> i.readFully(b) }
-                if (String(h, 0, 4) != "BJNP" || (h[5].toInt() and 0xFF) != TCP_PRINT) throw IOException("accusé BJNP invalide")
-                val n = ByteBuffer.wrap(h, 12, 4).int
-                val ack = ByteArray(n).also { b -> i.readFully(b) }
-                if (n != 4 || ByteBuffer.wrap(ack).int != data.size) throw IOException("envoi BJNP non confirmé")
+                for (data in parts) {
+                    o.write(header(TCP_PRINT, ++seq, session, data.size) + data); o.flush()
+                    val h = ByteArray(16).also { b -> i.readFully(b) }
+                    if (String(h, 0, 4) != "BJNP" || (h[5].toInt() and 0xFF) != TCP_PRINT) throw IOException("accusé BJNP invalide")
+                    val n = ByteBuffer.wrap(h, 12, 4).int
+                    val ack = ByteArray(n).also { b -> i.readFully(b) }
+                    if (n != 4 || ByteBuffer.wrap(ack).int != data.size) throw IOException("envoi BJNP non confirmé")
+                }
             }
         } finally {
             runCatching { udp(ip, CLOSE, ++seq, session, ByteArray(0)) }
@@ -248,14 +263,16 @@ object ToolWatch {
     suspend fun snapshot(ip: String): String? = withContext(Dispatchers.IO) { runCatching { Bjnp.status(ip) }.getOrNull() }
 
     /** Interroge toutes les 2 s ; onUpdate(état lisible, réponse brute). */
-    suspend fun follow(ip: String, base: String?, onUpdate: (String, String) -> Unit) {
+    suspend fun follow(ip: String, baseXml: String?, onUpdate: (String, String) -> Unit) {
+        val base = baseXml?.let { Bjnp.readable(it) }
         val start = System.currentTimeMillis()
         var seenBusy = false
         var fails = 0
         while (System.currentTimeMillis() - start < 15 * 60_000L) {
             delay(2000)
             val sec = (System.currentTimeMillis() - start) / 1000
-            val st = snapshot(ip)
+            val full = snapshot(ip)
+            val st = full?.let { Bjnp.readable(it) }
             if (st == null) {
                 if (++fails >= 5) { onUpdate("état indisponible (pas de réponse BJNP)", ""); return }
                 continue

@@ -224,9 +224,10 @@ fun MaintenanceScreen(m: Modifier, prefs: PrinterPrefs, ip: String, go: (Screen)
             }
             busy = null
             if (ok) {
-                raw = base?.let { "avant : $it" } ?: ""
+                val before = base?.let { Bjnp.readable(it) }
+                raw = before?.let { "avant : $it" } ?: ""
                 watchJob = scope.launch {
-                    ToolWatch.follow(ip, base) { s, r -> watch = s; if (r.isNotEmpty()) raw = (base?.let { "avant : $it\n" } ?: "") + "actuel : $r" }
+                    ToolWatch.follow(ip, base) { s, r -> watch = s; if (r.isNotEmpty()) raw = (before?.let { "avant : $it\n" } ?: "") + "actuel : $r" }
                 }
             }
         }
@@ -279,7 +280,7 @@ fun MaintenanceScreen(m: Modifier, prefs: PrinterPrefs, ip: String, go: (Screen)
         if (msg.isNotEmpty()) Text(msg)
         if (watch.isNotEmpty()) Text("État : $watch", style = MaterialTheme.typography.titleSmall)
         if (raw.isNotEmpty()) androidx.compose.foundation.text.selection.SelectionContainer {
-            Text("Réponse brute (à m'envoyer) :\n$raw", style = MaterialTheme.typography.bodySmall)
+            Text("Imprimante :\n$raw", style = MaterialTheme.typography.bodySmall)
         }
         Text("Outils", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Tool.entries.forEach { t ->
