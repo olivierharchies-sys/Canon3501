@@ -26,8 +26,14 @@ enum class Tool(val label: String, val bjl: String, val desc: String, val heavy:
     CleanColor("Nettoyage couleur", "@Cleaning=1CL", "Nettoyage limité à la tête couleur."),
     DeepClean("Nettoyage en profondeur", "@DeepCleaning=1ALL",
         "Uniquement après deux nettoyages normaux sans effet. Consomme beaucoup d'encre.", heavy = true, rui = "ut_deep_cln.cgi"),
-    Alignment("Alignement des têtes", "@TestPrint=Auto",
-        "Imprime la feuille d'alignement. Chargez du papier A4.", rui = "ut_auto_regi.cgi"),
+    SystemClean("Nettoyage du système", "",
+        "Purge des tubes d'encre : en dernier recours, après plusieurs nettoyages en profondeur. Consomme énormément d'encre.",
+        heavy = true, rui = "ut_system_cln.cgi"),
+    Alignment("Alignement : imprimer la feuille", "@TestPrint=Auto",
+        "Imprime la feuille d'alignement des têtes. Chargez du papier A4 ordinaire.", rui = "ut_frod_print.cgi"),
+    AlignScan("Alignement : lire la feuille", "",
+        "Posez la feuille d'alignement face imprimée vers le bas sur la vitre, coin repéré en haut à gauche, puis lancez.",
+        rui = "ut_frod_scan.cgi"),
     Roller("Nettoyage des rouleaux", "@RollerCleaning",
         "Retirez le papier du bac arrière avant de lancer.", rui = "ut_roller_mf_cln.cgi"),
     Plate("Nettoyage de la platine", "@PlateCleaning",
@@ -72,9 +78,10 @@ object CanonTools {
 
     /** Envoie la commande ; renvoie le transport qui l'a acceptée. */
     suspend fun run(ip: String, t: Tool, mode: Transport, pwd: String = ""): String = withContext(Dispatchers.IO) {
+        if (t.bjl.isEmpty() && mode != Transport.Auto && mode != Transport.Web) throw IOException("outil disponible en mode Web uniquement")
         val data = payload(t)
         val web = if (t.rui != null) listOf(Transport.Web) else emptyList()
-        val order = if (mode == Transport.Auto) web + listOf(Transport.Bjnp, Transport.Lpd, Transport.Raw, Transport.Ipp) else listOf(mode)
+        val order = if (mode == Transport.Auto) web + (if (t.bjl.isEmpty()) emptyList() else listOf(Transport.Bjnp, Transport.Lpd, Transport.Raw, Transport.Ipp)) else listOf(mode)
         val errors = mutableListOf<String>()
         for (tr in order) {
             try {
@@ -308,8 +315,6 @@ object Rui {
     private val cookies = mutableMapOf<String, String>()
     private var sbid = ""
     private var lastCode = 0
-    private var lastLoc = ""
-    private var loginInfo = ""
 
     private fun tag(x: String, n: String): String? = Regex("<$n>([^<]*)</$n>").find(x)?.groupValues?.get(1)
 
@@ -323,7 +328,7 @@ object Rui {
                 c.outputStream.use { it.write(body.toByteArray()) }
             }
             val code = c.responseCode
-            lastCode = code; lastLoc = c.getHeaderField("Location").orEmpty()
+            lastCode = code
             c.headerFields.filterKeys { it != null && it.equals("Set-Cookie", true) }.values.flatten().forEach {
                 val kv = it.substringBefore(';')
                 if ('=' in kv) cookies[kv.substringBefore('=').trim()] = kv.substringAfter('=').trim()
@@ -333,8 +338,6 @@ object Rui {
     }
 
     private fun data(d: String) = if (sbid.isEmpty()) d else (if (d.isEmpty()) "" else "$d&") + "SBID=$sbid"
-
-    private fun needLogin(x: String) = "SES_ERR_URL" in x || tag(x, "RESULT") == "LOCKED"
 
     /** Champ caché SBID, guillemets facultatifs (le HTML brut peut différer de ce qu'affiche le navigateur). */
     private fun findSbid(page: String): String {
@@ -347,20 +350,6 @@ object Rui {
             ?: Regex("""SBID["']?\s*[:=,]\s*["']([0-9A-Za-z]{16,})""").find(page)?.groupValues?.get(1) ?: ""
     }
 
-    /** Aperçu de diagnostic : contexte autour de SBID, ou début de page. */
-    private fun peek(page: String): String {
-        val i = page.indexOf("SBID")
-        val raw = if (i >= 0) page.substring((i - 60).coerceAtLeast(0), (i + 90).coerceAtMost(page.length))
-        else "${page.length} car., ${if ("logon" in page) "renvoie vers logon" else page.take(120)}"
-        return raw.replace(Regex("\\s+"), " ")
-    }
-
-    /** Page suivante : en-tête Location ou balise meta refresh. */
-    private fun next(page: String): String? {
-        val u = lastLoc.ifEmpty { Regex("""url=([^"'>\s]+)""", RegexOption.IGNORE_CASE).find(page)?.groupValues?.get(1).orEmpty() }
-        return u.ifEmpty { null }?.let { it.substringAfter("/rui/", it.substringAfterLast('/')) }
-    }
-
     private fun login(ip: String, pwd: String) {
         if (pwd.isBlank()) throw IOException("mot de passe administrateur requis")
         if (!pwd.matches(Regex("[0-9A-Za-z]{4,32}"))) throw IOException("mot de passe : 4 à 32 lettres ou chiffres")
@@ -368,60 +357,94 @@ object Rui {
             .joinToString("") { "%02x".format(it) }
         cookies.clear(); sbid = ""
         runCatching { req(ip, "logon_manager.html", null) }   // cookie de session initial, comme le navigateur
-        val trace = mutableListOf("logon $lastCode")
-        var page = req(ip, "sendpw.cgi", "NAMAE=$hash&IDTYPE=2")
-        trace += "sendpw $lastCode"
-        sbid = findSbid(page)
-        var hops = 0
-        while (sbid.isEmpty() && hops++ < 3) {
-            val n = next(page) ?: break
-            page = runCatching { req(ip, n, null) }.getOrDefault("")
-            trace += "$n $lastCode"
-            sbid = findSbid(page)
-        }
-        if (sbid.isEmpty()) {
-            page = runCatching { req(ip, "index.html", null) }.getOrDefault("")
-            trace += "index.html $lastCode"
-            sbid = findSbid(page)
-        }
-        loginInfo = trace.joinToString(" → ") + " · cookies ${cookies.keys} · SBID " +
-            (if (sbid.isEmpty()) "absent · index : ${peek(page)}" else "ok")
+        req(ip, "sendpw.cgi", "NAMAE=$hash&IDTYPE=2")
+        sbid = findSbid(runCatching { req(ip, "index.html", null) }.getOrDefault(""))
+        if (sbid.isEmpty()) throw IOException(
+            if (lastCode == 404) "interface web indisponible : fermez la session ouverte dans un navigateur, ou redémarrez l'imprimante"
+            else "connexion refusée : vérifiez le mot de passe"
+        )
     }
 
-    /** Lance l'outil ; renvoie le numéro de travail. */
-    fun start(ip: String, pwd: String, t: Tool): String {
-        val url = t.rui ?: throw IOException("pas d'équivalent dans l'interface web")
-        var r = req(ip, url, data(""))
-        // Sans session valide, l'imprimante répond RW_SES_NG, LOCKED ou même 404 : connexion puis nouvel essai.
-        if (tag(r, "RESULT") !in setOf("RW_OK", "RW_POLLING", "RW_NG")) { login(ip, pwd); r = req(ip, url, data("")) }
+    /** Session absente ou expirée : RW_SES_NG, SES_ERR_URL, LOCKED ou même 404. */
+    private fun stale(r: String) = "SES_ERR_URL" in r || lastCode == 404 || tag(r, "RESULT") in setOf("LOCKED", "RW_SES_NG")
+
+    /** POST avec connexion automatique si la session manque. */
+    @Synchronized
+    fun call(ip: String, pwd: String, path: String, body: String): String {
+        var r = req(ip, path, data(body))
+        if (stale(r)) { login(ip, pwd); r = req(ip, path, data(body)) }
+        if (stale(r)) throw IOException("session refusée par l'imprimante")
+        return r
+    }
+
+    /** Toutes les balises simples de la réponse XML (la dernière l'emporte). */
+    fun fields(x: String): Map<String, String> =
+        Regex("<([A-Za-z0-9_]+)>([^<]*)</\\1>").findAll(x).associate { it.groupValues[1] to it.groupValues[2] }
+
+    /** Lecture d'une page de réglages (GETINFO=0). */
+    suspend fun read(ip: String, pwd: String, path: String, body: String = "GETINFO=0"): Map<String, String> =
+        withContext(Dispatchers.IO) { fields(call(ip, pwd, path, body)) }
+
+    /** Écriture d'un réglage ; attend la fin si l'imprimante répond RW_POLLING. */
+    suspend fun write(ip: String, pwd: String, path: String, body: String): String = withContext(Dispatchers.IO) {
+        val r = call(ip, pwd, path, body)
+        val res = tag(r, "RESULT") ?: throw IOException("réponse inattendue (HTTP $lastCode)")
+        if ("NG" in res) throw IOException("refusé par l'imprimante ($res)")
+        if (res == "RW_POLLING") {
+            repeat(15) {
+                delay(1500)
+                when (tag(req(ip, "get_job_status.cgi", data("")), "getJobState")) {
+                    "2" -> return@withContext "OK"
+                    "3" -> throw IOException("l'imprimante signale une erreur")
+                }
+            }
+        }
+        "OK"
+    }
+
+    /** Lance un travail (outil, vérification firmware…) ; renvoie le numéro de travail. */
+    fun start(ip: String, pwd: String, url: String): String {
+        val r = call(ip, pwd, url, "")
         return when (tag(r, "RESULT")) {
             "RW_OK", "RW_POLLING" -> tag(r, "JOB_NUM") ?: "0"
             "RW_NG" -> throw IOException("refusé par l'imprimante (${tag(r, "DETAIL") ?: "occupée ou en erreur"})")
-            "LOCKED" -> throw IOException("mot de passe administrateur refusé")
-            else -> throw IOException("réponse inattendue : ${tag(r, "RESULT") ?: "HTTP $lastCode"}\nConnexion : $loginInfo")
+            else -> throw IOException("réponse inattendue : ${tag(r, "RESULT") ?: "HTTP $lastCode"}")
         }
     }
 
-    /** Lance puis suit l'outil ; onUpdate reçoit l'état lisible. Renvoie le message final. */
-    suspend fun run(ip: String, pwd: String, t: Tool, onUpdate: (String) -> Unit): String = withContext(Dispatchers.IO) {
-        val job = start(ip, pwd, t)
+    fun start(ip: String, pwd: String, t: Tool): String =
+        start(ip, pwd, t.rui ?: throw IOException("pas d'équivalent dans l'interface web"))
+
+    /** Lance puis suit un travail ; renvoie (message final, dernière réponse XML). */
+    suspend fun job(ip: String, pwd: String, url: String, onUpdate: (String) -> Unit): Pair<String, String> = withContext(Dispatchers.IO) {
+        val job = start(ip, pwd, url)
         val t0 = System.currentTimeMillis()
         delay(800)
         while (System.currentTimeMillis() - t0 < 15 * 60_000L) {
             val sec = (System.currentTimeMillis() - t0) / 1000
             val s = req(ip, "get_job_status.cgi", data("JOB_NUM=$job"))
-            if (needLogin(s)) throw IOException("session perdue pendant le suivi")
+            if (stale(s)) throw IOException("session perdue pendant le suivi")
             val msg = when (tag(s, "getJobState")) {
                 "1" -> "en cours… ($sec s)"
                 "5" -> "erreur imprimante : vérifiez l'écran et le papier ($sec s)"
-                "2" -> return@withContext "terminé ($sec s)"
+                "2" -> return@withContext "terminé ($sec s)" to s
                 "3" -> throw IOException("l'imprimante signale une erreur")
-                "4" -> return@withContext "annulé"
+                "4" -> return@withContext "annulé" to s
                 else -> "état inconnu : ${s.take(80)}"
             }
             withContext(Dispatchers.Main) { onUpdate(msg) }
             delay(2500)
         }
-        "suivi arrêté après 15 min"
+        "suivi arrêté après 15 min" to ""
+    }
+
+    /** Lance puis suit l'outil ; renvoie le message final. */
+    suspend fun run(ip: String, pwd: String, t: Tool, onUpdate: (String) -> Unit): String =
+        job(ip, pwd, t.rui ?: throw IOException("pas d'équivalent dans l'interface web"), onUpdate).first
+
+    /** Annule le travail en cours (bouton Stop de la page web). */
+    suspend fun cancel(ip: String, pwd: String): String = withContext(Dispatchers.IO) {
+        val r = call(ip, pwd, "job_cancel.cgi", "")
+        if (tag(r, "RESULT") == "RW_OK") "annulation demandée" else "annulation refusée (${tag(r, "RESULT") ?: "HTTP $lastCode"})"
     }
 }

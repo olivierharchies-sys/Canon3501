@@ -43,6 +43,9 @@ class PrinterPrefs(ctx: Context) {
 
     fun removeProfile(ip: String) { profiles = profiles.filter { it.ip != ip } }
 
+    var printOpts: String
+        get() = sp.getString("printOpts", "") ?: ""
+        set(v) = sp.edit().putString("printOpts", v).apply()
     var directPrint: Boolean
         get() = sp.getBoolean("direct", false)
         set(v) = sp.edit().putBoolean("direct", v).apply()

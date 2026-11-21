@@ -293,7 +293,7 @@ fun MaintenanceScreen(m: Modifier, prefs: PrinterPrefs, ip: String, go: (Screen)
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                 modifier = Modifier.fillMaxWidth(),
             )
-            Hint("Mode Web : mêmes commandes que la page https://$ip/. Mot de passe par défaut : n° de série.")
+            Hint("Mode Web : mêmes commandes que la page https://$ip/. Mot de passe par défaut : n° de série. Fermez toute session ouverte dans un navigateur.")
             Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Transport.entries.forEach { tr ->
                     FilterChip(
@@ -316,6 +316,11 @@ fun MaintenanceScreen(m: Modifier, prefs: PrinterPrefs, ip: String, go: (Screen)
             }) { Text("Copier le message") }
         }
         if (watch.isNotEmpty()) Text("État : $watch", style = MaterialTheme.typography.titleSmall)
+        if (watch.startsWith("en cours") || watch.startsWith("erreur imprimante")) {
+            OutlinedButton(onClick = {
+                scope.launch { msg = try { "Arrêt : " + Rui.cancel(ip, prefs.ruiPassword) } catch (e: Exception) { "Arrêt impossible : ${e.message}" } }
+            }) { Text("Arrêter l'entretien en cours") }
+        }
         if (raw.isNotEmpty()) androidx.compose.foundation.text.selection.SelectionContainer {
             Text("Imprimante :\n$raw", style = MaterialTheme.typography.bodySmall)
         }
@@ -331,6 +336,7 @@ fun MaintenanceScreen(m: Modifier, prefs: PrinterPrefs, ip: String, go: (Screen)
                 },
             ) { Hint(t.desc) }
         }
+        if (ip.isNotBlank()) PrinterWebSettings(ip, prefs)
         Text("Autres", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         MCard(
             "Page de test (téléphone)",
@@ -343,7 +349,7 @@ fun MaintenanceScreen(m: Modifier, prefs: PrinterPrefs, ip: String, go: (Screen)
             "Page intégrée : état, réseau et, selon le modèle, commandes de maintenance.",
             "Ouvrir", Icons.Filled.Language,
         ) {
-            if (ip.isNotBlank()) ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("http://$ip/")))
+            if (ip.isNotBlank()) ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://$ip/")))
         }
         MCard("Service d'impression Android", "Active ou règle le module d'impression Canon / Mopria.", "Ouvrir", Icons.Filled.Settings) {
             ctx.startActivity(Intent(Settings.ACTION_PRINT_SETTINGS))
@@ -483,6 +489,7 @@ fun InfoScreen(m: Modifier, ip: String) {
             Text("Compteur de pages non communiqué par l'imprimante.", style = MaterialTheme.typography.bodySmall)
         }
         OutlinedButton(onClick = { load() }, enabled = !loading) { Text("Actualiser") }
+        PrinterWebInfo(ip, PrinterPrefs(androidx.compose.ui.platform.LocalContext.current))
         AppCounters()
     }
 }

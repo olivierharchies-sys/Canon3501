@@ -19,7 +19,10 @@ import java.io.File
 import android.graphics.Color as AColor
 
 /** Filtres de document. */
-enum class Filter(val label: String) { None("Original"), Gray("Gris"), Doc("Document"), BW("Noir et blanc") }
+enum class Filter(val label: String) {
+    None("Original"), Gray("Gris"), Doc("Document"), BW("Noir et blanc"),
+    Sepia("Sépia"), Vintage("Vintage"), Warm("Chaud"), Cold("Froid"), Vivid("Éclatant"), Faded("Délavé"), Invert("Négatif"),
+}
 
 /** Page numérisée : JPEG brut, résolution, rotation en degrés. */
 class Page(val bytes: ByteArray, val dpi: Int, val rot: Int = 0) {
@@ -188,12 +191,50 @@ object Images {
         return Bitmap.createScaledBitmap(bg, src.width, src.height, true)
     }
 
-    /** Filtres de document : gris, suppression du fond, noir et blanc. */
+    /** Filtres colorimétriques (matrice 4×5) ; null pour les filtres de document. */
+    private fun matrix(f: Filter): ColorMatrix? = when (f) {
+        Filter.Gray -> ColorMatrix().apply { setSaturation(0f) }
+        Filter.Sepia -> ColorMatrix(floatArrayOf(
+            0.393f, 0.769f, 0.189f, 0f, 0f,
+            0.349f, 0.686f, 0.168f, 0f, 0f,
+            0.272f, 0.534f, 0.131f, 0f, 0f,
+            0f, 0f, 0f, 1f, 0f))
+        Filter.Vintage -> ColorMatrix().apply { setSaturation(0.55f) }.also {
+            it.postConcat(ColorMatrix(floatArrayOf(
+                0.9f, 0f, 0f, 0f, 35f,
+                0f, 0.85f, 0f, 0f, 25f,
+                0f, 0f, 0.7f, 0f, 15f,
+                0f, 0f, 0f, 1f, 0f)))
+        }
+        Filter.Warm -> ColorMatrix().apply { setScale(1.08f, 1.0f, 0.85f, 1f) }
+        Filter.Cold -> ColorMatrix().apply { setScale(0.88f, 0.98f, 1.1f, 1f) }
+        Filter.Vivid -> ColorMatrix().apply { setSaturation(1.6f) }.also {
+            it.postConcat(ColorMatrix(floatArrayOf(
+                1.1f, 0f, 0f, 0f, -12f,
+                0f, 1.1f, 0f, 0f, -12f,
+                0f, 0f, 1.1f, 0f, -12f,
+                0f, 0f, 0f, 1f, 0f)))
+        }
+        Filter.Faded -> ColorMatrix().apply { setSaturation(0.6f) }.also {
+            it.postConcat(ColorMatrix(floatArrayOf(
+                0.8f, 0f, 0f, 0f, 45f,
+                0f, 0.8f, 0f, 0f, 45f,
+                0f, 0f, 0.8f, 0f, 45f,
+                0f, 0f, 0f, 1f, 0f)))
+        }
+        Filter.Invert -> ColorMatrix(floatArrayOf(
+            -1f, 0f, 0f, 0f, 255f,
+            0f, -1f, 0f, 0f, 255f,
+            0f, 0f, -1f, 0f, 255f,
+            0f, 0f, 0f, 1f, 0f))
+        else -> null
+    }
+
+    /** Filtres : colorimétriques (matrice) ou de document (suppression du fond, noir et blanc). */
     fun applyFilter(src: Bitmap, f: Filter): Bitmap {
         if (f == Filter.None) return src
-        if (f == Filter.Gray) {
+        matrix(f)?.let { cm ->
             val out = Bitmap.createBitmap(src.width, src.height, Bitmap.Config.ARGB_8888)
-            val cm = ColorMatrix().apply { setSaturation(0f) }
             Canvas(out).drawBitmap(src, 0f, 0f, Paint().apply { colorFilter = ColorMatrixColorFilter(cm) })
             return out
         }

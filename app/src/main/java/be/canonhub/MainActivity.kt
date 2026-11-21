@@ -451,6 +451,18 @@ fun androidPrint(ctx: Context, uri: Uri, mime: String) {
     markPrint(ctx)
 }
 
+/** Fenêtre Android avec les réglages de l'appli : format, orientation, couleur, brouillon, pages par feuille. */
+suspend fun androidPrintOpts(ctx: Context, uri: Uri, mime: String, o: PrintOpts): String {
+    val (u, land) = if (PrintPrep.needsPrep(mime, o)) {
+        withContext(Dispatchers.IO) { PrintPrep.prepare(ctx, uri, mime, o) }.let { Uri.fromFile(it.first) to it.second }
+    } else uri to (o.orient == Orient.Landscape)
+    val name = "Canon-${System.currentTimeMillis() / 1000}"
+    val pm = ctx.getSystemService(Context.PRINT_SERVICE) as PrintManager
+    pm.print(name, PdfPrintAdapter(ctx.applicationContext, u, name), PrintPrep.attributes(o, land))
+    markPrint(ctx)
+    return "Fenêtre d'impression ouverte. " + o.reminder()
+}
+
 fun printBitmap(ctx: Context, name: String, bmp: Bitmap) {
     PrintHelper(ctx).apply {
         scaleMode = PrintHelper.SCALE_MODE_FIT
@@ -502,6 +514,15 @@ fun Toggle(label: String, checked: Boolean, onChange: (Boolean) -> Unit) {
     }
 }
 
+/** Titre + rangée de puces défilante, une seule sélection. */
+@Composable
+fun <T> OptChips(title: String, items: List<T>, sel: T, label: (T) -> String, on: (T) -> Unit) {
+    Text(title, style = MaterialTheme.typography.labelLarge)
+    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        items.forEach { v -> FilterChip(selected = v == sel, onClick = { on(v) }, label = { Text(label(v)) }) }
+    }
+}
+
 @Composable
 fun ColorChips(color: Boolean, onColor: (Boolean) -> Unit) {
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -524,18 +545,18 @@ fun PrintScreen(m: Modifier, prefs: PrinterPrefs, ip: String, shared: Uri?, clea
     var busy by remember { mutableStateOf(false) }
     var msg by remember { mutableStateOf("") }
     var verso by remember { mutableStateOf<File?>(null) }
+    var opts by remember { mutableStateOf(printOptsOf(prefs.printOpts)) }
+    fun setOpts(o: PrintOpts) { opts = o; prefs.printOpts = o.save() }
 
     suspend fun output(uri: Uri, mime: String): String =
         if (direct && ip.isNotBlank()) {
             try {
                 directPrint(ctx, ip, uri, mime, copies, color)
             } catch (e: Exception) {
-                androidPrint(ctx, uri, mime)
-                "Impression directe refusée (${e.message}) : fenêtre Android ouverte."
+                "Impression directe refusée (${e.message}). " + androidPrintOpts(ctx, uri, mime, opts)
             }
         } else {
-            androidPrint(ctx, uri, mime)
-            "Fenêtre d'impression ouverte."
+            androidPrintOpts(ctx, uri, mime, opts)
         }
 
     fun go(uri: Uri) {
@@ -619,6 +640,18 @@ fun PrintScreen(m: Modifier, prefs: PrinterPrefs, ip: String, shared: Uri?, clea
             if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
             if (msg.isNotEmpty()) Text(msg, style = MaterialTheme.typography.bodyMedium)
             Hint("Astuce : depuis Galerie ou Fichiers, « Partager » puis « Imprimer avec la Canon ».")
+        }
+        Section("Réglages d'impression", Icons.Filled.Settings, sub = "${opts.paper.label} · ${opts.quality.label} · ${if (opts.color) "Couleur" else "N&B"}") {
+            OptChips("Format", Paper.entries, opts.paper, { it.label }) { setOpts(opts.copy(paper = it)) }
+            OptChips("Type de papier", MediaType.entries, opts.type, { it.label }) { setOpts(opts.copy(type = it)) }
+            OptChips("Qualité", Quality.entries, opts.quality, { it.label }) { setOpts(opts.copy(quality = it)) }
+            if (opts.quality == Quality.Draft) Hint("Brouillon : couleurs éclaircies avant l'envoi, environ 40 % d'encre en moins.")
+            OptChips("Orientation", Orient.entries, opts.orient, { it.label }) { setOpts(opts.copy(orient = it)) }
+            OptChips("Pages par feuille", listOf(1, 2, 4), opts.nUp, { "$it" }) { setOpts(opts.copy(nUp = it)) }
+            ColorChips(opts.color) { setOpts(opts.copy(color = it)) }
+            Toggle("Sans bordure", opts.borderless) { setOpts(opts.copy(borderless = it)) }
+            Toggle("Remplir la page (photo recadrée)", opts.fill) { setOpts(opts.copy(fill = it)) }
+            Hint("Format, orientation et couleur sont transmis. Type de papier et qualité se confirment dans la fenêtre Canon : Android ne les transmet pas.")
         }
         Section("Planche photos", Icons.Filled.Face, sub = "Une photo répétée sur une feuille A4") {
             Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
