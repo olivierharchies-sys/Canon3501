@@ -18,6 +18,14 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import android.graphics.Color as AColor
 
+/** Filtres de document. */
+enum class Filter(val label: String) { None("Original"), Gray("Gris"), Doc("Document"), BW("Noir et blanc") }
+
+/** Page numérisée : JPEG brut, résolution, rotation en degrés. */
+class Page(val bytes: ByteArray, val dpi: Int, val rot: Int = 0) {
+    fun rotated(): Page = Page(bytes, dpi, (rot + 90) % 360)
+}
+
 /** Traitements d'image et fabrication de PDF. */
 object Images {
     /** Nom de fichier daté : Scan_2026-11-21_01-10-05. */
@@ -135,10 +143,84 @@ object Images {
         return out
     }
 
-    fun process(bytes: ByteArray, maxDim: Int, crop: Boolean, bright: Float, contrast: Float): Bitmap? {
+    fun process(
+        bytes: ByteArray, maxDim: Int, crop: Boolean, bright: Float, contrast: Float,
+        filt: Filter = Filter.None, rot: Int = 0,
+    ): Bitmap? {
         var b = decode(bytes, maxDim) ?: return null
+        b = rotate(b, rot)
         if (crop) b = autoCrop(deskew(b))
+        b = applyFilter(b, filt)
         return adjust(b, bright, contrast)
+    }
+
+    /** Rotation par quarts de tour (90, 180, 270). */
+    fun rotate(src: Bitmap, deg: Int): Bitmap {
+        val d = ((deg % 360) + 360) % 360
+        if (d == 0) return src
+        val m = android.graphics.Matrix().apply { setRotate(d.toFloat()) }
+        return Bitmap.createBitmap(src, 0, 0, src.width, src.height, m, true)
+    }
+
+    /** Fond estimé : image réduite, dilatée (efface le texte), puis agrandie. */
+    private fun background(src: Bitmap): Bitmap {
+        val sw = (src.width / 16).coerceAtLeast(8)
+        val sh = (src.height / 16).coerceAtLeast(8)
+        val small = Bitmap.createScaledBitmap(src, sw, sh, true)
+        var px = IntArray(sw * sh)
+        small.getPixels(px, 0, sw, 0, 0, sw, sh)
+        repeat(2) {
+            val o = IntArray(px.size)
+            for (y in 0 until sh) for (x in 0 until sw) {
+                var r = 0; var g = 0; var b = 0
+                for (dy in -2..2) {
+                    val yy = (y + dy).coerceIn(0, sh - 1)
+                    for (dx in -2..2) {
+                        val c = px[yy * sw + (x + dx).coerceIn(0, sw - 1)]
+                        r = maxOf(r, AColor.red(c)); g = maxOf(g, AColor.green(c)); b = maxOf(b, AColor.blue(c))
+                    }
+                }
+                o[y * sw + x] = AColor.rgb(r, g, b)
+            }
+            px = o
+        }
+        val bg = Bitmap.createBitmap(px, sw, sh, Bitmap.Config.ARGB_8888)
+        return Bitmap.createScaledBitmap(bg, src.width, src.height, true)
+    }
+
+    /** Filtres de document : gris, suppression du fond, noir et blanc. */
+    fun applyFilter(src: Bitmap, f: Filter): Bitmap {
+        if (f == Filter.None) return src
+        if (f == Filter.Gray) {
+            val out = Bitmap.createBitmap(src.width, src.height, Bitmap.Config.ARGB_8888)
+            val cm = ColorMatrix().apply { setSaturation(0f) }
+            Canvas(out).drawBitmap(src, 0f, 0f, Paint().apply { colorFilter = ColorMatrixColorFilter(cm) })
+            return out
+        }
+        val w = src.width; val h = src.height
+        val bg = background(src)
+        val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val row = IntArray(w); val brow = IntArray(w)
+        fun lv(v: Int, b: Int): Int {
+            val n = v * 255 / maxOf(b, 40)
+            return ((n - 30) * 255 / 200).coerceIn(0, 255)
+        }
+        for (y in 0 until h) {
+            src.getPixels(row, 0, w, 0, y, w, 1)
+            bg.getPixels(brow, 0, w, 0, y, w, 1)
+            for (x in 0 until w) {
+                val c = row[x]; val b = brow[x]
+                val r = lv(AColor.red(c), AColor.red(b))
+                val g = lv(AColor.green(c), AColor.green(b))
+                val bl = lv(AColor.blue(c), AColor.blue(b))
+                row[x] = if (f == Filter.BW) {
+                    if ((r * 30 + g * 59 + bl * 11) / 100 < 150) AColor.BLACK else AColor.WHITE
+                } else AColor.rgb(r, g, bl)
+            }
+            out.setPixels(row, 0, w, 0, y, w, 1)
+        }
+        bg.recycle()
+        return out
     }
 
     fun jpeg(b: Bitmap, q: Int = 90): ByteArray =
@@ -164,7 +246,7 @@ object Images {
     }
 
     /** PDF A4 à partir de scans JPEG, une page décodée à la fois. */
-    fun pdfFromScans(scans: List<ByteArray>, out: java.io.OutputStream, f: (ByteArray) -> Bitmap?) {
+    fun <T> pdfFromScans(scans: List<T>, out: java.io.OutputStream, f: (T) -> Bitmap?) {
         val doc = PdfDocument()
         scans.forEachIndexed { i, s ->
             val b = f(s) ?: return@forEachIndexed

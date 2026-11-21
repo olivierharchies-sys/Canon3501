@@ -53,10 +53,10 @@ class PrinterPrefs(ctx: Context) {
         get() = sp.getInt("inkThreshold", 15)
         set(v) = sp.edit().putInt("inkThreshold", v).apply()
     var clogReminder: Boolean
-        get() = sp.getBoolean("clog", false)
+        get() = sp.getBoolean("clog", true)
         set(v) = sp.edit().putBoolean("clog", v).apply()
     var clogDays: Int
-        get() = sp.getInt("clogDays", 7)
+        get() = sp.getInt("clogDays", 14)
         set(v) = sp.edit().putInt("clogDays", v).apply()
     var lastPrint: Long
         get() = sp.getLong("lastPrint", 0L)
@@ -86,6 +86,9 @@ class PrinterPrefs(ctx: Context) {
         Escl.hint = esclHint.ifBlank { null }
     }
 
+    var askedNotif: Boolean
+        get() = sp.getBoolean("askedNotif", false)
+        set(v) = sp.edit().putBoolean("askedNotif", v).apply()
     var lastClogNotify: Long
         get() = sp.getLong("lastClogNotify", 0L)
         set(v) = sp.edit().putLong("lastClogNotify", v).apply()

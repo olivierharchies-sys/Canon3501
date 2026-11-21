@@ -40,6 +40,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DocumentScanner
@@ -136,6 +138,19 @@ fun App(prefs: PrinterPrefs, incoming: Intent?, consumed: () -> Unit) {
     var shared by remember { mutableStateOf<Uri?>(null) }
     BackHandler(enabled = screen != Screen.Home) { screen = Screen.Home }
 
+    // Rappel d'entretien actif par défaut : demande l'autorisation des notifications une fois.
+    val ctx0 = LocalContext.current
+    val notifPerm = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
+    LaunchedEffect(Unit) {
+        if (Build.VERSION.SDK_INT >= 33 && !prefs.askedNotif && (prefs.clogReminder || prefs.inkAlert) &&
+            androidx.core.content.ContextCompat.checkSelfPermission(ctx0, android.Manifest.permission.POST_NOTIFICATIONS) !=
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            prefs.askedNotif = true
+            notifPerm.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
     LaunchedEffect(incoming) {
         val i = incoming ?: return@LaunchedEffect
         sharedUri(i)?.let { shared = it; screen = Screen.Print }
@@ -217,7 +232,11 @@ fun HomeScreen(m: Modifier, prefs: PrinterPrefs, ip: String, setIp: (String) -> 
         Tile("Imprimer", "PDF, photos, recto-verso", Icons.Filled.Print, Color(0xFF1E88E5), Screen.Print),
         Tile("Numériser", "Multipage, PDF", Icons.Filled.DocumentScanner, Color(0xFF43A047), Screen.Scan),
         Tile("Copier", "Copies, carte ID", Icons.Filled.ContentCopy, Color(0xFFF4511E), Screen.Copy),
-        Tile("Entretien", "Nettoyage, buses", Icons.Filled.Build, Color(0xFF00897B), Screen.Maintenance),
+        Tile(
+            "Entretien",
+            if (prefs.clogReminder && (daysSince(prefs.lastPrint) ?: 0L) >= prefs.clogDays) "Test des buses conseillé" else "Nettoyage, buses",
+            Icons.Filled.Build, Color(0xFF00897B), Screen.Maintenance,
+        ),
         Tile("Encre et état", "Niveaux, alertes", Icons.Filled.WaterDrop, Color(0xFF8E24AA), Screen.Ink, needsIpp = true),
         Tile("File d'attente", "Tâches, annulation", Icons.Filled.HourglassEmpty, Color(0xFF6D4C41), Screen.Queue),
         Tile("Infos", "Modèle, identifiant", Icons.Filled.Info, Color(0xFF3949AB), Screen.Info),
@@ -508,67 +527,56 @@ fun PrintScreen(m: Modifier, prefs: PrinterPrefs, ip: String, shared: Uri?, clea
 
     Column(m.padding(16.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         shared?.let { u ->
-            ElevatedCard(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Fichier reçu", fontWeight = FontWeight.Bold)
-                    Text(u.lastPathSegment ?: u.toString(), style = MaterialTheme.typography.bodySmall)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(enabled = !busy, onClick = { go(u) }) { Text("Imprimer") }
-                        OutlinedButton(onClick = clearShared) { Text("Ignorer") }
-                    }
+            Section("Fichier reçu", Icons.Filled.Folder, sub = u.lastPathSegment ?: u.toString()) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(enabled = !busy, modifier = Modifier.weight(1f), onClick = { go(u) }) { Text("Imprimer") }
+                    OutlinedButton(modifier = Modifier.weight(1f), onClick = clearShared) { Text("Ignorer") }
                 }
             }
         }
-        Toggle("Impression directe (IPP, sans fenêtre Android)", direct) { direct = it; prefs.directPrint = it }
-        if (direct) {
-            Stepper("Copies", copies, 1..99) { copies = it }
-            ColorChips(color) { color = it }
-            Text(
-                "Si l'imprimante refuse le format, la fenêtre Android s'ouvre automatiquement.",
-                style = MaterialTheme.typography.bodySmall,
-            )
-        }
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Checkbox(checked = duplex, onCheckedChange = { duplex = it })
-            Text("Recto-verso manuel (PDF)")
-        }
-        if (duplex) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Checkbox(checked = reverse, onCheckedChange = { reverse = it })
-                Text("Verso en ordre inverse")
+        Section("Document", Icons.Filled.Print, sub = "PDF ou image depuis le téléphone") {
+            Button(enabled = !busy, onClick = { picker.launch(arrayOf("application/pdf", "image/*")) }, modifier = Modifier.fillMaxWidth()) {
+                Text("Choisir un fichier")
             }
-            Text(
-                "Imprime les pages impaires, puis les paires après retournement. Faites un essai sur 2 feuilles pour trouver le bon sens et l'ordre.",
-                style = MaterialTheme.typography.bodySmall,
-            )
+            verso?.let { v ->
+                Button(
+                    enabled = !busy,
+                    modifier = Modifier.fillMaxWidth(),
+                    onClick = {
+                        scope.launch {
+                            busy = true
+                            msg = try { output(Uri.fromFile(v), "application/pdf") } catch (e: Exception) { "Échec : ${e.message}" }
+                            verso = null
+                            busy = false
+                        }
+                    },
+                ) { Text("Imprimer le verso") }
+            }
+            if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+            if (msg.isNotEmpty()) Text(msg, style = MaterialTheme.typography.bodyMedium)
+            Hint("Astuce : depuis Galerie ou Fichiers, « Partager » puis « Imprimer avec la Canon ».")
         }
-        Button(enabled = !busy, onClick = { picker.launch(arrayOf("application/pdf", "image/*")) }, modifier = Modifier.fillMaxWidth()) {
-            Text("Choisir un fichier")
+        Section("Mode d'envoi", Icons.Filled.Settings) {
+            Toggle("Impression directe (IPP, sans fenêtre Android)", direct) { direct = it; prefs.directPrint = it }
+            if (direct) {
+                Stepper("Copies", copies, 1..99) { copies = it }
+                ColorChips(color) { color = it }
+                Hint("Si l'imprimante refuse le format, la fenêtre Android s'ouvre automatiquement.")
+            } else {
+                Hint("La fenêtre Android règle copies, couleur et format.")
+            }
         }
-        verso?.let { v ->
-            Button(
-                enabled = !busy,
-                modifier = Modifier.fillMaxWidth(),
-                onClick = {
-                    scope.launch {
-                        busy = true
-                        msg = try { output(Uri.fromFile(v), "application/pdf") } catch (e: Exception) { "Échec : ${e.message}" }
-                        verso = null
-                        busy = false
-                    }
-                },
-            ) { Text("Imprimer le verso") }
+        Section("Recto-verso manuel", Icons.Filled.ContentCopy, sub = "PDF : impaires puis paires") {
+            Toggle("Activer", duplex) { duplex = it }
+            if (duplex) {
+                Toggle("Verso en ordre inverse", reverse) { reverse = it }
+                Hint("Faites un essai sur 2 feuilles pour trouver le bon sens et l'ordre.")
+            }
         }
-        if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
-        if (msg.isNotEmpty()) Text(msg)
         OutlinedButton(
             onClick = { ctx.startActivity(Intent(Settings.ACTION_PRINT_SETTINGS)) },
             modifier = Modifier.fillMaxWidth(),
         ) { Text("Service d'impression Android") }
-        Text(
-            "Astuce : depuis Galerie ou Fichiers, « Partager » puis « Imprimer avec la Canon ».",
-            style = MaterialTheme.typography.bodySmall,
-        )
     }
 }
 
@@ -596,6 +604,15 @@ fun ScanOptions(
 }
 
 @Composable
+fun FilterChips(value: Filter, onChange: (Filter) -> Unit) {
+    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Filter.entries.forEach { f ->
+            FilterChip(selected = value == f, onClick = { onChange(f) }, label = { Text(f.label) })
+        }
+    }
+}
+
+@Composable
 fun ScanScreen(m: Modifier, ip: String) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -603,38 +620,48 @@ fun ScanScreen(m: Modifier, ip: String) {
     var dpi by remember { mutableIntStateOf(300) }
     var color by remember { mutableStateOf(true) }
     var crop by remember { mutableStateOf(false) }
+    var filt by remember { mutableStateOf(Filter.None) }
     var bright by remember { mutableFloatStateOf(0f) }
     var contrast by remember { mutableFloatStateOf(1f) }
     var busy by remember { mutableStateOf(false) }
     var msg by remember { mutableStateOf("") }
-    var pages by remember { mutableStateOf<List<ByteArray>>(emptyList()) }
+    var pages by remember { mutableStateOf<List<Page>>(emptyList()) }
+    var sel by remember { mutableIntStateOf(0) }
     var preview by remember { mutableStateOf<Bitmap?>(null) }
     var progress by remember { mutableFloatStateOf(0f) }
     var job by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     var ocrPdf by remember { mutableStateOf(false) }
     var ocrText by remember { mutableStateOf<String?>(null) }
     var out by remember { mutableStateOf(OutFmt()) }
-    var dpis by remember { mutableStateOf<List<Int>>(emptyList()) }
     var detected by remember { mutableStateOf<String?>(null) }
     val target = out.target()
+    val cur = pages.getOrNull(sel.coerceIn(0, (pages.size - 1).coerceAtLeast(0)))
 
-    LaunchedEffect(pages.lastOrNull(), crop, bright, contrast) {
-        val last = pages.lastOrNull()
+    LaunchedEffect(cur, crop, filt, bright, contrast) {
+        val p = cur
         withContext(Dispatchers.Default) {
-            val dec = last?.let { Images.decode(it, 1200) }
-            preview = if (last == null) null else Images.process(last, 1200, crop, bright, contrast)
-            val pv = preview
-            detected = if (last == null || dec == null || pv == null) null else {
-                val (w, h) = Formats.physical(last, dpis.lastOrNull() ?: 300, pv, dec.width)
+            val dec = p?.let { Images.decode(it.bytes, 1200) }
+            val pv = p?.let { Images.process(it.bytes, 1200, crop, bright, contrast, filt, it.rot) }
+            preview = pv
+            detected = if (p == null || dec == null || pv == null) null else {
+                val (w, h) = Formats.physical(p.bytes, p.dpi, pv, dec.width)
                 Formats.detect(w, h)
             }
         }
     }
 
-    fun full(b: ByteArray) = Images.process(b, 3508, crop, bright, contrast)
+    fun proc(p: Page, max: Int) = Images.process(p.bytes, max, crop, bright, contrast, filt, p.rot)
+    fun full(p: Page) = proc(p, 3508)
 
     /** Page prête à imprimer : A4 avec l'image à la taille choisie. */
     fun printable(b: Bitmap): Bitmap = target?.let { Formats.onA4(b, it) } ?: b
+
+    fun move(d: Int) {
+        val i = sel; val j = i + d
+        if (i !in pages.indices || j !in pages.indices) return
+        val l = pages.toMutableList(); val t = l[i]; l[i] = l[j]; l[j] = t
+        pages = l; sel = j
+    }
 
     val snack = LocalSnack.current
     fun work(label: String, block: suspend () -> String) {
@@ -655,7 +682,7 @@ fun ScanScreen(m: Modifier, ip: String) {
     suspend fun pdfUri(): Uri = withContext(Dispatchers.IO) {
         val u = if (ocrPdf) {
             val done = pages.map { p ->
-                val b = Images.process(p, 2480, crop, bright, contrast) ?: throw IOException("image illisible")
+                val b = proc(p, 2480) ?: throw IOException("image illisible")
                 b to runCatching { Ocr.read(b) }.getOrNull()
             }
             Images.savePdf(ctx) { o -> Ocr.searchablePdf(done, target, o) }
@@ -669,15 +696,17 @@ fun ScanScreen(m: Modifier, ip: String) {
     }
 
     Column(m.padding(16.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        ScanOptions(area, { area = it }, dpi, { dpi = it }, color, { color = it })
+        Section("Numérisation", Icons.Filled.DocumentScanner) {
+            ScanOptions(area, { area = it }, dpi, { dpi = it }, color, { color = it })
+        }
         Button(
             enabled = !busy,
             modifier = Modifier.fillMaxWidth(),
             onClick = {
                 work("Numérisation en cours…") {
                     val b = Escl.scan(ip, dpi, color, area) { progress = it }
-                    dpis = dpis + dpi
-                    pages = pages + listOf(b)
+                    pages = pages + Page(b, dpi)
+                    sel = pages.size - 1
                     "${pages.size} page(s) numérisée(s)."
                 }
             },
@@ -715,12 +744,6 @@ fun ScanScreen(m: Modifier, ip: String) {
         }
 
         if (pages.isNotEmpty()) {
-            Toggle("Redresser et recadrer le document", crop) { crop = it }
-            FormatPicker(out, { out = it }, detected)
-            Text("Luminosité ${bright.toInt()}")
-            Slider(value = bright, onValueChange = { bright = it }, valueRange = -80f..80f)
-            Text("Contraste ${"%.1f".format(contrast)}")
-            Slider(value = contrast, onValueChange = { contrast = it }, valueRange = 0.5f..2f)
             preview?.let {
                 Card(
                     shape = MaterialTheme.shapes.large,
@@ -728,60 +751,91 @@ fun ScanScreen(m: Modifier, ip: String) {
                     modifier = Modifier.fillMaxWidth(),
                 ) { Image(it.asImageBitmap(), "Aperçu", Modifier.fillMaxWidth()) }
             }
-            PageStrip(pages)
-            Text("${pages.size} page(s). Les réglages s'appliquent à toutes les pages.", style = MaterialTheme.typography.bodySmall)
-            Toggle("PDF avec texte cherchable (OCR)", ocrPdf) { ocrPdf = it }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(enabled = !busy, onClick = {
-                    work(if (ocrPdf) "Création du PDF (OCR)…" else "Création du PDF…") { pdfUri(); "PDF enregistré (Historique)." }
-                }) { Text("PDF") }
-                Button(enabled = !busy, onClick = {
-                    work("Enregistrement…") {
-                        withContext(Dispatchers.IO) {
-                            pages.forEach { p -> full(p)?.let { b -> Images.saveJpeg(ctx, Images.jpeg(target?.let { t -> Formats.resize(b, t) } ?: b)) } }
-                        }
-                        "JPEG enregistré(s) (Historique)."
+            Section("Pages", sub = "Page ${sel + 1} sur ${pages.size} · touchez une vignette") {
+                PageStrip(pages, sel) { sel = it }
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                    IconButton(enabled = !busy && sel > 0, onClick = { move(-1) }) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "Déplacer vers la gauche")
                     }
-                }) { Text("JPEG") }
-                OutlinedButton(enabled = !busy, onClick = {
-                    work("Préparation…") {
-                        if (pages.size == 1) {
-                            val b = withContext(Dispatchers.Default) { full(pages[0])?.let { printable(it) } } ?: throw IOException("image illisible")
-                            printBitmap(ctx, "scan", b)
-                        } else {
-                            val f = File(ctx.cacheDir, "scan.pdf")
-                            withContext(Dispatchers.IO) { f.outputStream().use { o -> Images.pdfFromScans(pages, o) { full(it)?.let { b -> printable(b) } } } }
-                            androidPrint(ctx, Uri.fromFile(f), "application/pdf")
-                        }
-                        "Fenêtre d'impression ouverte."
+                    IconButton(enabled = !busy && sel < pages.size - 1, onClick = { move(1) }) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowForward, "Déplacer vers la droite")
                     }
-                }) { Text("Imprimer") }
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(enabled = !busy, onClick = {
-                    work("Préparation…") {
-                        if (pages.size == 1) {
-                            val u = withContext(Dispatchers.IO) { full(pages[0])?.let { b -> Images.saveJpeg(ctx, Images.jpeg(target?.let { t -> Formats.resize(b, t) } ?: b)) } }
-                                ?: throw IOException("enregistrement impossible")
-                            share(ctx, u, "image/jpeg")
-                        } else {
-                            share(ctx, pdfUri(), "application/pdf")
-                        }
-                        ""
-                    }
-                }) { Text("Partager") }
-                OutlinedButton(enabled = !busy, onClick = { pages = pages.dropLast(1); dpis = dpis.dropLast(1); msg = "" }) { Text("Suppr. dernière") }
-                OutlinedButton(enabled = !busy, onClick = { pages = emptyList(); dpis = emptyList(); msg = "" }) { Text("Effacer") }
-            }
-            OutlinedButton(enabled = !busy, modifier = Modifier.fillMaxWidth(), onClick = {
-                work("Lecture du texte…") {
-                    val txt = withContext(Dispatchers.Default) {
-                        pages.mapNotNull { p -> Images.process(p, 2480, crop, bright, contrast) }
-                    }.map { Ocr.read(it).text }.joinToString("\n\n")
-                    ocrText = txt
-                    if (txt.isBlank()) "Aucun texte détecté." else ""
+                    IconButton(enabled = !busy, onClick = {
+                        pages = pages.toMutableList().also { l -> l[sel] = l[sel].rotated() }
+                    }) { Icon(Icons.Filled.Refresh, "Tourner d'un quart de tour") }
+                    IconButton(enabled = !busy, onClick = {
+                        pages = pages.toMutableList().also { l -> l.removeAt(sel) }
+                        sel = sel.coerceAtMost((pages.size - 1).coerceAtLeast(0))
+                    }) { Icon(Icons.Filled.Delete, "Supprimer la page") }
+                    androidx.compose.foundation.layout.Spacer(Modifier.weight(1f))
+                    androidx.compose.material3.TextButton(enabled = !busy, onClick = { pages = emptyList(); sel = 0; msg = "" }) { Text("Tout effacer") }
                 }
-            }) { Text("Extraire le texte (OCR)") }
+            }
+            Section("Retouche", sub = "S'applique à toutes les pages") {
+                Toggle("Redresser et recadrer", crop) { crop = it }
+                Text("Filtre", style = MaterialTheme.typography.labelLarge)
+                FilterChips(filt) { filt = it }
+                if (filt == Filter.Doc || filt == Filter.BW) Hint("Fond blanchi, ombres et papier jauni supprimés : économise l'encre.")
+                Text("Luminosité ${bright.toInt()}", style = MaterialTheme.typography.labelLarge)
+                Slider(value = bright, onValueChange = { bright = it }, valueRange = -80f..80f)
+                Text("Contraste ${"%.1f".format(contrast)}", style = MaterialTheme.typography.labelLarge)
+                Slider(value = contrast, onValueChange = { contrast = it }, valueRange = 0.5f..2f)
+                FormatPicker(out, { out = it }, detected)
+            }
+            Section("Enregistrer et partager") {
+                Toggle("PDF avec texte cherchable (OCR)", ocrPdf) { ocrPdf = it }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(enabled = !busy, modifier = Modifier.weight(1f), onClick = {
+                        work(if (ocrPdf) "Création du PDF (OCR)…" else "Création du PDF…") { pdfUri(); "PDF enregistré (Documents)." }
+                    }) { Text("PDF") }
+                    Button(enabled = !busy, modifier = Modifier.weight(1f), onClick = {
+                        work("Enregistrement…") {
+                            withContext(Dispatchers.IO) {
+                                pages.forEach { p -> full(p)?.let { b -> Images.saveJpeg(ctx, Images.jpeg(target?.let { t -> Formats.resize(b, t) } ?: b)) } }
+                            }
+                            "JPEG enregistré(s) (Documents)."
+                        }
+                    }) { Text("JPEG") }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(enabled = !busy, modifier = Modifier.weight(1f), onClick = {
+                        work("Préparation…") {
+                            if (pages.size == 1) {
+                                val b = withContext(Dispatchers.Default) { full(pages[0])?.let { printable(it) } } ?: throw IOException("image illisible")
+                                printBitmap(ctx, "scan", b)
+                            } else {
+                                val f = File(ctx.cacheDir, "scan.pdf")
+                                withContext(Dispatchers.IO) {
+                                    f.outputStream().use { o -> Images.pdfFromScans(pages, o) { p -> full(p)?.let { b -> printable(b) } } }
+                                }
+                                androidPrint(ctx, Uri.fromFile(f), "application/pdf")
+                            }
+                            "Fenêtre d'impression ouverte."
+                        }
+                    }) { Text("Imprimer") }
+                    OutlinedButton(enabled = !busy, modifier = Modifier.weight(1f), onClick = {
+                        work("Préparation…") {
+                            if (pages.size == 1) {
+                                val u = withContext(Dispatchers.IO) { full(pages[0])?.let { b -> Images.saveJpeg(ctx, Images.jpeg(target?.let { t -> Formats.resize(b, t) } ?: b)) } }
+                                    ?: throw IOException("enregistrement impossible")
+                                share(ctx, u, "image/jpeg")
+                            } else {
+                                share(ctx, pdfUri(), "application/pdf")
+                            }
+                            ""
+                        }
+                    }) { Text("Partager") }
+                }
+                OutlinedButton(enabled = !busy, modifier = Modifier.fillMaxWidth(), onClick = {
+                    work("Lecture du texte…") {
+                        val txt = withContext(Dispatchers.Default) {
+                            pages.mapNotNull { p -> proc(p, 2480) }
+                        }.map { Ocr.read(it).text }.joinToString("\n\n")
+                        ocrText = txt
+                        if (txt.isBlank()) "Aucun texte détecté." else ""
+                    }
+                }) { Text("Extraire le texte (OCR)") }
+            }
         }
         ocrText?.let { t ->
             androidx.compose.material3.AlertDialog(
@@ -811,20 +865,29 @@ fun ScanScreen(m: Modifier, ip: String) {
     }
 }
 
-/** Vignettes des pages numérisées. */
+/** Vignettes des pages numérisées ; la page choisie est encadrée. */
 @Composable
-fun PageStrip(pages: List<ByteArray>) {
-    if (pages.size < 2) return
+fun PageStrip(pages: List<Page>, sel: Int, onSelect: (Int) -> Unit) {
     androidx.compose.foundation.lazy.LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         items(pages.size) { i ->
-            val th by androidx.compose.runtime.produceState<Bitmap?>(null, pages[i]) {
-                value = withContext(Dispatchers.Default) { Images.decode(pages[i], 240) }
+            val p = pages[i]
+            val th by androidx.compose.runtime.produceState<Bitmap?>(null, p) {
+                value = withContext(Dispatchers.Default) { Images.decode(p.bytes, 240)?.let { Images.rotate(it, p.rot) } }
             }
+            val on = i == sel
             Column(horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally) {
-                Card(shape = MaterialTheme.shapes.small, modifier = Modifier.size(64.dp, 88.dp)) {
+                Card(
+                    onClick = { onSelect(i) },
+                    shape = MaterialTheme.shapes.small,
+                    border = androidx.compose.foundation.BorderStroke(
+                        if (on) 2.dp else 1.dp,
+                        if (on) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant,
+                    ),
+                    modifier = Modifier.size(64.dp, 88.dp),
+                ) {
                     th?.let { Image(it.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop) }
                 }
-                Text("${i + 1}", style = MaterialTheme.typography.labelSmall)
+                Text("${i + 1}", style = MaterialTheme.typography.labelSmall, color = if (on) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }
@@ -845,9 +908,11 @@ fun CopyScreen(m: Modifier, prefs: PrinterPrefs, ip: String) {
     var msg by remember { mutableStateOf("") }
     var front by remember { mutableStateOf<Bitmap?>(null) }
     var out by remember { mutableStateOf(OutFmt()) }
+    var filt by remember { mutableStateOf(Filter.None) }
 
-    suspend fun output0(bmp: Bitmap): String =
-        if (direct) {
+    suspend fun output0(src: Bitmap): String {
+        val bmp = withContext(Dispatchers.Default) { Images.applyFilter(src, filt) }
+        return if (direct) {
             try {
                 val data = withContext(Dispatchers.Default) { Images.jpeg(bmp) }
                 val id = Ipp.printDoc(ip, data, "image/jpeg", "Copie", copies, color)
@@ -861,6 +926,7 @@ fun CopyScreen(m: Modifier, prefs: PrinterPrefs, ip: String) {
             printBitmap(ctx, "copie", bmp)
             "Fenêtre d'impression ouverte : réglez le nombre de copies."
         }
+    }
 
     suspend fun output(src: Bitmap): String {
         val t = out.target()
@@ -872,6 +938,9 @@ fun CopyScreen(m: Modifier, prefs: PrinterPrefs, ip: String) {
         ScanOptions(area, { area = it; front = null }, dpi, { dpi = it }, color, { color = it }, cardLabel = "Carte ID R/V")
         Toggle("Impression directe (IPP)", direct) { direct = it; prefs.directPrint = it }
         if (direct) Stepper("Copies", copies, 1..99) { copies = it }
+        Text("Filtre", style = MaterialTheme.typography.labelLarge)
+        FilterChips(filt) { filt = it }
+        if (filt == Filter.Doc || filt == Filter.BW) Hint("Fond blanchi : économise l'encre.")
         if (area == Area.Card) Text("Recto et verso de la carte sur une seule feuille A4, taille réelle.")
         else FormatPicker(out, { out = it })
         if (area != Area.Card && out.fmt != Fmt.Original) {

@@ -13,7 +13,22 @@ import android.os.Build
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.size
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Bookmark
+import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.Language
+import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.Print
+import androidx.compose.material.icons.filled.Schedule
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.WaterDrop
+import androidx.compose.material.icons.filled.Wifi
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -99,37 +114,48 @@ fun InkScreen(m: Modifier, prefs: PrinterPrefs, ip: String) {
 
     Column(m.padding(16.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
-        err?.let {
-            Text("Niveaux IPP indisponibles.", color = MaterialTheme.colorScheme.error)
-            Text("La G3000 n'a pas de capteur réseau des réservoirs : contrôlez les niveaux à l'œil.")
-            BjnpState(ip)
-        }
         info?.let { i ->
-            ElevatedCard(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text(i.model, style = MaterialTheme.typography.titleMedium)
-                    Text("État : ${i.state}")
-                    if (i.message.isNotBlank()) Text(i.message, style = MaterialTheme.typography.bodySmall)
-                    i.reasons.forEach { Text("• ${reasonLabel(it)}") }
-                }
+            Section(i.model, Icons.Filled.Print, sub = "État : ${i.state}") {
+                if (i.message.isNotBlank()) Hint(i.message)
+                i.reasons.forEach { Pill(reasonLabel(it), MaterialTheme.colorScheme.error) }
             }
-            if (i.inks.isEmpty()) Text("Cette imprimante ne communique pas ses niveaux d'encre.")
-            i.inks.forEach { ink ->
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text(if (ink.level in 0..100) "${ink.name} : ${ink.level} %" else "${ink.name} : niveau inconnu")
+            Section("Niveaux d'encre", Icons.Filled.WaterDrop) {
+                if (i.inks.isEmpty()) Hint("Cette imprimante ne communique pas ses niveaux d'encre.")
+                i.inks.forEach { ink ->
+                    val c = ink.color?.let { Color(it) } ?: MaterialTheme.colorScheme.primary
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(ink.name, Modifier.weight(1f))
+                        Text(if (ink.level in 0..100) "${ink.level} %" else "?", fontWeight = FontWeight.SemiBold)
+                    }
                     LinearProgressIndicator(
                         progress = { (ink.level.coerceIn(0, 100)) / 100f },
-                        color = ink.color?.let { Color(it) } ?: MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.fillMaxWidth(),
+                        color = c,
+                        trackColor = c.copy(alpha = 0.15f),
+                        modifier = Modifier.fillMaxWidth().height(10.dp),
                     )
                 }
             }
         }
-        OutlinedButton(onClick = { load() }, enabled = !loading) { Text("Actualiser") }
-        Text(
-            "Réservoirs : le contrôle visuel fait foi. Alertes automatiques dans Réglages.",
-            style = MaterialTheme.typography.bodySmall,
-        )
+        if (err != null) {
+            Section(
+                "Niveaux d'encre", Icons.Filled.WaterDrop, sub = "Non communiqués par le réseau",
+                trailing = { Pill("Contrôle visuel", MaterialTheme.colorScheme.secondary) },
+            ) {
+                Hint("La G3000 n'a pas de capteur réseau des réservoirs : regardez les fenêtres à l'avant.")
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    listOf("Noir" to Color(0xFF212121), "Cyan" to Color(0xFF00ACC1), "Magenta" to Color(0xFFD81B60), "Jaune" to Color(0xFFFDD835))
+                        .forEach { (n, c) ->
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Box(Modifier.size(28.dp, 44.dp).background(c, MaterialTheme.shapes.small))
+                                Text(n, style = MaterialTheme.typography.labelSmall)
+                            }
+                        }
+                }
+                Hint("Rechargez avant le repère inférieur : un réservoir trop vide fait entrer de l'air dans les buses.")
+            }
+            BjnpState(ip)
+        }
+        OutlinedButton(onClick = { load() }, enabled = !loading, modifier = Modifier.fillMaxWidth()) { Text("Actualiser") }
     }
 }
 
@@ -160,13 +186,10 @@ fun testBitmap(): Bitmap {
 }
 
 @Composable
-fun MCard(title: String, text: String, action: String? = null, onClick: () -> Unit = {}) {
-    ElevatedCard(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-            Text(text)
-            if (action != null) Button(onClick = onClick) { Text(action) }
-        }
+fun MCard(title: String, text: String, action: String? = null, icon: ImageVector? = null, onClick: () -> Unit = {}) {
+    Section(title, icon) {
+        Hint(text)
+        if (action != null) OutlinedButton(onClick = onClick) { Text(action) }
     }
 }
 
@@ -208,60 +231,71 @@ fun MaintenanceScreen(m: Modifier, prefs: PrinterPrefs, ip: String, go: (Screen)
     }
 
     Column(m.padding(16.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text("Outils de l'imprimante", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-        Text(
-            "Commandes Canon envoyées par le réseau (expérimental). Si rien ne se passe, changez de mode d'envoi ou utilisez le menu de l'imprimante.",
-            style = MaterialTheme.typography.bodySmall,
-        )
-        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Transport.entries.forEach { tr ->
-                FilterChip(
-                    selected = transport == tr,
-                    onClick = { transport = tr; log.transport = tr },
-                    label = { Text(tr.label) },
-                )
+        val idle = remember(refresh) { daysSince(prefs.lastPrint) }
+        val late = idle != null && idle >= prefs.clogDays
+        Section(
+            "Utilisation", Icons.Filled.Schedule,
+            sub = when (idle) {
+                null -> "Aucune impression enregistrée"
+                0L -> "Imprimé aujourd'hui"
+                else -> "Dernière impression il y a $idle jour(s)"
+            },
+            accent = if (late) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+            trailing = { if (late) Pill("À faire", MaterialTheme.colorScheme.error) else Pill("OK", Color(0xFF43A047)) },
+        ) {
+            Hint(
+                if (prefs.clogReminder) "Rappel après ${prefs.clogDays} jours sans impression (Réglages)."
+                else "Rappel anti-bouchage désactivé (Réglages).",
+            )
+            Button(enabled = busy == null, modifier = Modifier.fillMaxWidth(), onClick = { runTool(Tool.NozzleCheck) }) {
+                Text("Imprimer un test des buses")
             }
+        }
+        Section("Mode d'envoi", Icons.Filled.Settings, sub = "Commandes Canon par le réseau (expérimental)") {
+            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Transport.entries.forEach { tr ->
+                    FilterChip(
+                        selected = transport == tr,
+                        onClick = { transport = tr; log.transport = tr },
+                        label = { Text(tr.label) },
+                    )
+                }
+            }
+            Hint("Si rien ne se passe, changez de mode ou utilisez le menu de l'imprimante.")
         }
         if (busy != null) LinearProgressIndicator(Modifier.fillMaxWidth())
         if (msg.isNotEmpty()) Text(msg)
+        Text("Outils", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Tool.entries.forEach { t ->
             val last = remember(refresh) { log.last(t) }
-            ElevatedCard(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text(t.label, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                    Text(t.desc)
-                    Text(
-                        if (last == 0L) "Jamais lancé depuis l'appli" else "Dernier : ${fmt.format(java.util.Date(last))}",
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                    Button(enabled = busy == null, onClick = { if (t.heavy) { confirm = t } else { runTool(t) } }) { Text("Lancer") }
-                }
-            }
+            Section(
+                t.label, Icons.Filled.Build,
+                sub = if (last == 0L) "Jamais lancé depuis l'appli" else "Dernier : ${fmt.format(java.util.Date(last))}",
+                accent = if (t.heavy) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+                trailing = {
+                    TextButton(enabled = busy == null, onClick = { if (t.heavy) { confirm = t } else { runTool(t) } }) { Text("Lancer") }
+                },
+            ) { Hint(t.desc) }
         }
-        Text("Autres", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+        Text("Autres", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         MCard(
             "Page de test (téléphone)",
             "Barres de couleur et traits fins imprimés via Android : utile si le test des buses ne part pas.",
-            "Imprimer",
+            "Imprimer", Icons.Filled.Print,
         ) { printBitmap(ctx, "test", testBitmap()) }
-        MCard("Niveaux d'encre", "À vérifier avant tout nettoyage.", "Voir les niveaux") { go(Screen.Ink) }
-        MCard(
-            "Réservoirs d'encre",
-            "Rechargez avant que l'encre passe sous le repère inférieur : un réservoir trop vide fait entrer de l'air et bouche les buses.",
-        )
+        MCard("Niveaux d'encre", "À vérifier avant tout nettoyage.", "Voir les niveaux", Icons.Filled.WaterDrop) { go(Screen.Ink) }
         MCard(
             "Interface web de l'imprimante",
             "Page intégrée : état, réseau et, selon le modèle, commandes de maintenance.",
-            "Ouvrir",
+            "Ouvrir", Icons.Filled.Language,
         ) {
             if (ip.isNotBlank()) ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("http://$ip/")))
         }
-        MCard("Service d'impression Android", "Active ou règle le module d'impression Canon / Mopria.", "Ouvrir") {
+        MCard("Service d'impression Android", "Active ou règle le module d'impression Canon / Mopria.", "Ouvrir", Icons.Filled.Settings) {
             ctx.startActivity(Intent(Settings.ACTION_PRINT_SETTINGS))
         }
-        Text(
+        Hint(
             "Sans réponse réseau : sur l'imprimante, maintenez Stop jusqu'au nombre de clignotements voulu (1 = test des buses, 2 = nettoyage, 3 = nettoyage en profondeur) puis relâchez. Voir le manuel du modèle.",
-            style = MaterialTheme.typography.bodySmall,
         )
     }
 }
@@ -426,78 +460,82 @@ fun SettingsScreen(m: Modifier, prefs: PrinterPrefs, ip: String, onSave: (String
     }
 
     Column(m.padding(16.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text("Imprimante", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-        Text("Le téléphone doit être sur le même Wi-Fi que l'imprimante.", style = MaterialTheme.typography.bodySmall)
-        OutlinedTextField(
-            value = text,
-            onValueChange = { text = it },
-            label = { Text("Adresse IP (ex. 192.168.1.50)") },
-            singleLine = true,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
-            modifier = Modifier.fillMaxWidth(),
-        )
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = { onSave(text.trim()); msg = "Enregistré" }) { Text("Enregistrer") }
+        Section("Imprimante", Icons.Filled.Wifi, sub = "Même Wi-Fi que le téléphone") {
+            OutlinedTextField(
+                value = text,
+                onValueChange = { text = it },
+                label = { Text("Adresse IP (ex. 192.168.1.50)") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(modifier = Modifier.weight(1f), onClick = { onSave(text.trim()); msg = "Enregistré" }) { Text("Enregistrer") }
+                OutlinedButton(
+                    modifier = Modifier.weight(1f),
+                    enabled = !busy && text.isNotBlank(),
+                    onClick = {
+                        scope.launch {
+                            busy = true; msg = "Test en cours (≈10 s)…"
+                            msg = try { Diag.run(ctx, text.trim()) } catch (e: Exception) { "Test impossible : ${e.message}" }
+                            busy = false
+                        }
+                    },
+                ) { Text("Tester") }
+            }
             OutlinedButton(
-                enabled = !busy && text.isNotBlank(),
+                enabled = !searching,
+                modifier = Modifier.fillMaxWidth(),
                 onClick = {
                     scope.launch {
-                        busy = true; msg = "Test en cours (≈10 s)…"
-                        msg = try { Diag.run(ctx, text.trim()) } catch (e: Exception) { "Test impossible : ${e.message}" }
-                        busy = false
+                        searching = true; msg = "Recherche sur le Wi-Fi…"
+                        found = try { Discovery.search(ctx) } catch (e: Exception) { emptyList() }
+                        msg = if (found.isEmpty()) "Aucune imprimante trouvée. Saisissez l'adresse à la main." else ""
+                        searching = false
                     }
                 },
-            ) { Text("Tester") }
-        }
-        OutlinedButton(
-            enabled = !searching,
-            modifier = Modifier.fillMaxWidth(),
-            onClick = {
-                scope.launch {
-                    searching = true; msg = "Recherche sur le Wi-Fi…"
-                    found = try { Discovery.search(ctx) } catch (e: Exception) { emptyList() }
-                    msg = if (found.isEmpty()) "Aucune imprimante trouvée. Saisissez l'adresse à la main." else ""
-                    searching = false
-                }
-            },
-        ) { Text(if (searching) "Recherche…" else "Rechercher l'imprimante") }
-        found.forEach { f ->
-            Card(
-                onClick = {
-                    text = f.ip; onSave(f.ip)
-                    prefs.addProfile(f.name, f.ip); profiles = prefs.profiles
-                    prefs.applyHints(f)
-                    msg = "Enregistré : ${f.ip}"
-                },
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Column(Modifier.padding(12.dp)) {
-                    Text(f.name, fontWeight = FontWeight.Bold)
-                    Text(f.ip)
-                    Text(f.summary(), style = MaterialTheme.typography.bodySmall)
+            ) { Text(if (searching) "Recherche…" else "Rechercher l'imprimante") }
+            if (busy || searching) LinearProgressIndicator(Modifier.fillMaxWidth())
+            found.forEach { f ->
+                Card(
+                    onClick = {
+                        text = f.ip; onSave(f.ip)
+                        prefs.addProfile(f.name, f.ip); profiles = prefs.profiles
+                        prefs.applyHints(f)
+                        msg = "Enregistré : ${f.ip}"
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Column(Modifier.padding(12.dp)) {
+                        Text(f.name, fontWeight = FontWeight.Bold)
+                        Text(f.ip)
+                        Hint(f.summary())
+                    }
                 }
             }
+            if (msg.isNotEmpty()) Text(msg, style = MaterialTheme.typography.bodyMedium)
         }
-        if (msg.isNotEmpty()) Text(msg)
 
-        HorizontalDivider()
-        Text("Mes imprimantes", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-        OutlinedTextField(
-            value = name,
-            onValueChange = { name = it },
-            label = { Text("Nom (ex. Bureau)") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-        )
-        OutlinedButton(enabled = text.isNotBlank(), onClick = {
-            prefs.addProfile(name, text); profiles = prefs.profiles; name = ""
-        }) { Text("Ajouter l'adresse ci-dessus") }
-        profiles.forEach { p ->
-            ElevatedCard(Modifier.fillMaxWidth()) {
-                Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+        Section("Mes imprimantes", Icons.Filled.Bookmark, sub = "Bascule rapide depuis l'accueil") {
+            OutlinedTextField(
+                value = name,
+                onValueChange = { name = it },
+                label = { Text("Nom (ex. Bureau)") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            OutlinedButton(enabled = text.isNotBlank(), modifier = Modifier.fillMaxWidth(), onClick = {
+                prefs.addProfile(name, text); profiles = prefs.profiles; name = ""
+            }) { Text("Ajouter l'adresse ci-dessus") }
+            profiles.forEach { p ->
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
-                        Text(p.name + if (p.ip == ip) " ✓" else "", fontWeight = FontWeight.Bold)
-                        Text(p.ip, style = MaterialTheme.typography.bodySmall)
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(p.name, fontWeight = FontWeight.SemiBold)
+                            if (p.ip == ip) Pill("Active", MaterialTheme.colorScheme.primary)
+                        }
+                        Hint(p.ip)
                     }
                     TextButton(onClick = { text = p.ip; onSave(p.ip) }) { Text("Utiliser") }
                     TextButton(onClick = { prefs.removeProfile(p.ip); profiles = prefs.profiles }) { Text("Suppr.") }
@@ -505,36 +543,37 @@ fun SettingsScreen(m: Modifier, prefs: PrinterPrefs, ip: String, onSave: (String
             }
         }
 
-        HorizontalDivider()
-        Text("Alertes", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-        Toggle("Encre faible", inkAlert) {
-            inkAlert = it; prefs.inkAlert = it
-            if (it) askNotif()
+        Section("Alertes", Icons.Filled.Notifications, sub = "Vérification toutes les 12 h environ") {
+            Toggle("Rappel anti-bouchage", clog) {
+                clog = it; prefs.clogReminder = it
+                if (it) askNotif()
+            }
+            if (clog) {
+                Hint("Propose un test des buses après $clogDays jours sans impression.")
+                Slider(
+                    value = clogDays.toFloat(),
+                    onValueChange = { clogDays = it.toInt(); prefs.clogDays = clogDays },
+                    valueRange = 3f..21f,
+                    steps = 17,
+                )
+            }
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Toggle("Encre faible (IPP)", inkAlert) {
+                inkAlert = it; prefs.inkAlert = it
+                if (it) askNotif()
+            }
+            if (inkAlert) {
+                Hint("Seuil : $threshold %. Sans effet si l'imprimante ne donne pas ses niveaux.")
+                Slider(
+                    value = threshold.toFloat(),
+                    onValueChange = { threshold = it.toInt(); prefs.inkThreshold = threshold },
+                    valueRange = 5f..50f,
+                    steps = 8,
+                )
+            }
+            OutlinedButton(modifier = Modifier.fillMaxWidth(), onClick = { WatchWorker.now(ctx); msg = "Vérification lancée." }) { Text("Vérifier maintenant") }
+            Hint("Widget « Canon : encre » disponible sur l'écran d'accueil.")
         }
-        if (inkAlert) {
-            Text("Seuil : $threshold %")
-            Slider(
-                value = threshold.toFloat(),
-                onValueChange = { threshold = it.toInt(); prefs.inkThreshold = threshold },
-                valueRange = 5f..50f,
-                steps = 8,
-            )
-        }
-        Toggle("Rappel anti-bouchage", clog) {
-            clog = it; prefs.clogReminder = it
-            if (it) askNotif()
-        }
-        if (clog) {
-            Text("Après $clogDays jours sans impression")
-            Slider(
-                value = clogDays.toFloat(),
-                onValueChange = { clogDays = it.toInt(); prefs.clogDays = clogDays },
-                valueRange = 3f..21f,
-                steps = 17,
-            )
-        }
-        Text("Vérification toutes les 12 h environ. Widget « Canon : encre » disponible sur l'écran d'accueil.", style = MaterialTheme.typography.bodySmall)
-        OutlinedButton(onClick = { WatchWorker.now(ctx); msg = "Vérification lancée." }) { Text("Vérifier maintenant") }
     }
 }
 
