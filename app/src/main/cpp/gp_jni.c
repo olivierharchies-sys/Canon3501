@@ -71,6 +71,51 @@ static jbyteArray take_output(JNIEnv *env) {
     return a;
 }
 
+/* Valeurs par défaut du pilote pour tout paramètre actif encore vide (2 passes : certains
+ * choix, comme Resolution, dépendent d'autres, comme MediaType). */
+static void fill_defaults(stp_vars_t *v) {
+    for (int pass = 0; pass < 2; pass++) {
+        stp_parameter_list_t list = stp_get_parameter_list(v);
+        size_t n = stp_parameter_list_count(list);
+        for (size_t i = 0; i < n; i++) {
+            const stp_parameter_t *p = stp_parameter_list_param(list, i);
+            stp_parameter_t d;
+            stp_describe_parameter(v, p->name, &d);
+            if (d.is_active) {
+                switch (d.p_type) {
+                case STP_PARAMETER_TYPE_STRING_LIST:
+                    if (!stp_check_string_parameter(v, p->name, STP_PARAMETER_DEFAULTED)) {
+                        if (d.deflt.str) stp_set_string_parameter(v, p->name, d.deflt.str);
+                        else if (d.bounds.str && stp_string_list_count(d.bounds.str) > 0)
+                            stp_set_string_parameter(v, p->name, stp_string_list_param(d.bounds.str, 0)->name);
+                    }
+                    break;
+                case STP_PARAMETER_TYPE_INT:
+                    if (!stp_check_int_parameter(v, p->name, STP_PARAMETER_DEFAULTED))
+                        stp_set_int_parameter(v, p->name, d.deflt.integer);
+                    break;
+                case STP_PARAMETER_TYPE_BOOLEAN:
+                    if (!stp_check_boolean_parameter(v, p->name, STP_PARAMETER_DEFAULTED))
+                        stp_set_boolean_parameter(v, p->name, d.deflt.boolean);
+                    break;
+                case STP_PARAMETER_TYPE_DOUBLE:
+                    if (!stp_check_float_parameter(v, p->name, STP_PARAMETER_DEFAULTED))
+                        stp_set_float_parameter(v, p->name, d.deflt.dbl);
+                    break;
+                case STP_PARAMETER_TYPE_DIMENSION:
+                    if (!stp_check_dimension_parameter(v, p->name, STP_PARAMETER_DEFAULTED))
+                        stp_set_dimension_parameter(v, p->name, d.deflt.dimension);
+                    break;
+                default:
+                    break;
+                }
+            }
+            stp_parameter_description_destroy(&d);
+        }
+        stp_parameter_list_destroy(list);
+    }
+}
+
 /* Réglages "clé=valeur" ; préfixes : "i:" entier, "b:" booléen, "f:" réel, sinon chaîne. */
 static stp_vars_t *make_vars(JNIEnv *env, jobjectArray kv) {
     stp_vars_t *v = stp_vars_create_copy(stp_printer_get_defaults(g_printer));
@@ -99,6 +144,7 @@ static stp_vars_t *make_vars(JNIEnv *env, jobjectArray kv) {
         (*env)->ReleaseStringUTFChars(env, js, s);
         (*env)->DeleteLocalRef(env, js);
     }
+    fill_defaults(v);
     return v;
 }
 
