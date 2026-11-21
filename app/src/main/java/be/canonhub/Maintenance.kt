@@ -392,12 +392,13 @@ object Rui {
     fun start(ip: String, pwd: String, t: Tool): String {
         val url = t.rui ?: throw IOException("pas d'équivalent dans l'interface web")
         var r = req(ip, url, data(""))
-        if (needLogin(r)) { login(ip, pwd); r = req(ip, url, data("")) }
+        // Sans session valide, l'imprimante répond RW_SES_NG, LOCKED ou même 404 : connexion puis nouvel essai.
+        if (tag(r, "RESULT") !in setOf("RW_OK", "RW_POLLING", "RW_NG")) { login(ip, pwd); r = req(ip, url, data("")) }
         return when (tag(r, "RESULT")) {
             "RW_OK", "RW_POLLING" -> tag(r, "JOB_NUM") ?: "0"
             "RW_NG" -> throw IOException("refusé par l'imprimante (${tag(r, "DETAIL") ?: "occupée ou en erreur"})")
             "LOCKED" -> throw IOException("mot de passe administrateur refusé")
-            else -> throw IOException("réponse inattendue : ${tag(r, "RESULT") ?: r.take(150)}\nConnexion : $loginInfo")
+            else -> throw IOException("réponse inattendue : ${tag(r, "RESULT") ?: "HTTP $lastCode"}\nConnexion : $loginInfo")
         }
     }
 
