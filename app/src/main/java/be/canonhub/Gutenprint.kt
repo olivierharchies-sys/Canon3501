@@ -14,6 +14,8 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
 import java.util.zip.ZipInputStream
+import kotlin.math.ln
+import kotlin.math.roundToInt
 
 /**
  * Pilote d'impression intégré : Gutenprint (logiciel libre, GPL v2+), modèle « Canon G3000 series ».
@@ -71,8 +73,122 @@ object Gutenprint {
         ready = true
     }
 
-    private fun kv(sel: Map<String, String>, borderless: Boolean): Array<String> =
-        (sel.filterValues { it.isNotEmpty() }.map { (k, v) -> "$k=$v" } + "b:FullBleed=${if (borderless) 1 else 0}").toTypedArray()
+    /** Réglages fins du pilote (écran « Réglage du pilote »). Valeurs neutres = comportement d'origine. */
+    data class Tune(
+        val brightness: Float = 1f, val contrast: Float = 1f, val gamma: Float = 1f,
+        val density: Float = 1f, val saturation: Float = 1f,
+        val cyan: Float = 1f, val magenta: Float = 1f, val yellow: Float = 1f,
+        val imageType: String = "", val dither: String = "",
+        val dpi: Int = 0, val shiftX: Float = 0f, val shiftY: Float = 0f, val scale: Float = 1f,
+        val diag: Boolean = false,
+    ) {
+        /** Réglages d'origine (diagnostic exclu). */
+        fun isDefault() = copy(diag = false) == Tune()
+        fun resetColors() = Tune().let { d -> copy(brightness = d.brightness, contrast = d.contrast, gamma = d.gamma,
+            density = d.density, saturation = d.saturation, cyan = d.cyan, magenta = d.magenta, yellow = d.yellow) }
+        fun resetSharp() = copy(dpi = 0, imageType = "", dither = "")
+        fun resetPos() = copy(shiftX = 0f, shiftY = 0f, scale = 1f)
+    }
+
+    /** Paramètres réels Gutenprint, ajoutés seulement s'ils diffèrent du neutre. */
+    private fun Tune.kv(): List<String> = buildList {
+        fun f(n: String, v: Float) { if (v != 1f) add("f:$n=$v") }
+        f("Brightness", brightness); f("Contrast", contrast); f("Gamma", gamma)
+        f("Density", density); f("Saturation", saturation)
+        f("Cyan", cyan); f("Magenta", magenta); f("Yellow", yellow)
+        if (imageType.isNotEmpty()) add("ImageType=$imageType")
+        if (dither.isNotEmpty()) add("DitherAlgorithm=$dither")
+    }
+
+    private fun sp(ctx: Context) = ctx.getSharedPreferences("gp_tune", Context.MODE_PRIVATE)
+
+    fun tune(ctx: Context): Tune = sp(ctx).let { p ->
+        val d = Tune()
+        Tune(
+            p.getFloat("bri", d.brightness), p.getFloat("con", d.contrast), p.getFloat("gam", d.gamma),
+            p.getFloat("den", d.density), p.getFloat("sat", d.saturation),
+            p.getFloat("cya", d.cyan), p.getFloat("mag", d.magenta), p.getFloat("yel", d.yellow),
+            p.getString("img", "") ?: "", p.getString("dit", "") ?: "",
+            p.getInt("dpi", 0), p.getFloat("sx", 0f), p.getFloat("sy", 0f), p.getFloat("sc", 1f),
+            p.getBoolean("diag", false),
+        )
+    }
+
+    fun saveTune(ctx: Context, t: Tune) = sp(ctx).edit()
+        .putFloat("bri", t.brightness).putFloat("con", t.contrast).putFloat("gam", t.gamma)
+        .putFloat("den", t.density).putFloat("sat", t.saturation)
+        .putFloat("cya", t.cyan).putFloat("mag", t.magenta).putFloat("yel", t.yellow)
+        .putString("img", t.imageType).putString("dit", t.dither)
+        .putInt("dpi", t.dpi).putFloat("sx", t.shiftX).putFloat("sy", t.shiftY).putFloat("sc", t.scale)
+        .putBoolean("diag", t.diag).apply()
+
+    private fun kv(sel: Map<String, String>, borderless: Boolean, t: Tune = Tune()): Array<String> =
+        (sel.filterValues { it.isNotEmpty() }.map { (k, v) -> "$k=$v" } + t.kv() + "b:FullBleed=${if (borderless) 1 else 0}").toTypedArray()
+
+    /** Page d'essai : la mire d'étalonnage, imprimée par le pilote avec les réglages en cours. */
+    suspend fun testPage(ctx: Context, ip: String, sel: Map<String, String>, dpi: Int, onStep: (String) -> Unit): String {
+        val f = File(ctx.cacheDir, "gp-test.png")
+        withContext(Dispatchers.IO) { f.outputStream().use { Calib.chart().compress(Bitmap.CompressFormat.PNG, 100, it) } }
+        return try { print(ctx, ip, Uri.fromFile(f), "image/png", sel, false, false, dpi, onStep, truePage = true) } finally { f.delete() }
+    }
+
+    /**
+     * Paramétrage automatique : à partir de la mire imprimée par le pilote puis relue au scanner,
+     * calcule de nouveaux réglages (échelle, position, gamma, densité, équilibre C/M/J).
+     * Retourne les réglages proposés et un résumé lisible.
+     */
+    fun autoTune(t: Tune, r: Calib.Report): Pair<Tune, List<String>> {
+        val notes = ArrayList<String>()
+        fun c(v: Float, lo: Float, hi: Float) = ((v.coerceIn(lo, hi) * 100).roundToInt() / 100f)
+        // Échelle : la mire est imprimée en taille réelle, avec l'échelle en cours.
+        val s = (r.scaleX + r.scaleY) / 2
+        val scale = c(t.scale / s, 0.9f, 1.1f)
+        notes += "Échelle mesurée ${"%.1f".format(s * 100)} % → réglage ${"%.1f".format(scale * 100)} %"
+        // Position : centre des repères attendu à (105 ; 148,5) mm.
+        var sx = t.shiftX; var sy = t.shiftY
+        r.centre?.let { (x, y) ->
+            val dx = x - 105f; val dy = y - 148.5f
+            sx = (((t.shiftX - dx).coerceIn(-10f, 10f)) * 2).roundToInt() / 2f
+            sy = (((t.shiftY - dy).coerceIn(-10f, 10f)) * 2).roundToInt() / 2f
+            notes += "Décalage mesuré ${"%+.1f".format(dx)} × ${"%+.1f".format(dy)} mm"
+        } ?: run { notes += "Mire à l'envers : position non mesurée" }
+        // Gamma : gris mesurés ≈ entrée^g. g > 1 = tons moyens trop sombres → gamma plus élevé (plus clair).
+        val lo = r.curve.first().toFloat(); val hi = r.curve.last().toFloat()
+        var gamma = t.gamma
+        if (hi - lo > 60) {
+            val gs = (2..8).mapNotNull { k ->
+                val m = (r.curve[k] - lo) / (hi - lo)
+                if (m in 0.02f..0.98f) (ln(m.toDouble()) / ln(k / 10.0)).toFloat() else null
+            }
+            if (gs.isNotEmpty()) {
+                val g = gs.average().toFloat()
+                gamma = c(t.gamma * g, 0.5f, 2f)
+                notes += "Tons moyens : exposant ${"%.2f".format(g)} (1 = juste)"
+            }
+        }
+        // Densité : noir trop clair → plus d'encre ; noir bouché et tons sombres écrasés → moins.
+        var density = t.density
+        if (lo > 55) density = c(t.density * (1 + (lo - 40) / 300), 0.5f, 1.5f)
+        else if (lo < 15 && r.curve[1] < 25) density = c(t.density * 0.95f, 0.5f, 1.5f)
+        notes += "Noir mesuré ${lo.roundToInt()} (idéal 20 à 45)"
+        // Équilibre : gris moyens (30 à 70 %). Canal trop clair → encre complémentaire insuffisante.
+        var cy = t.cyan; var ma = t.magenta; var ye = t.yellow
+        val mid = r.greys.slice(3..7.coerceAtMost(r.greys.lastIndex))
+        if (mid.isNotEmpty()) {
+            fun f(ch: Int): Float {
+                val ratios = mid.mapNotNull { g ->
+                    val l = (g[0] + g[1] + g[2]) / 3f
+                    if (l in 20f..235f && g[ch] in 5..250) (ln(l / 255.0) / ln(g[ch] / 255.0)).toFloat() else null
+                }
+                return if (ratios.isEmpty()) 1f else ratios.average().toFloat()
+            }
+            cy = c(t.cyan * f(0), 0.5f, 1.5f); ma = c(t.magenta * f(1), 0.5f, 1.5f); ye = c(t.yellow * f(2), 0.5f, 1.5f)
+            notes += "Gris moyen R${mid[mid.size / 2][0]} V${mid[mid.size / 2][1]} B${mid[mid.size / 2][2]}"
+        }
+        notes += r.warnings
+        return t.copy(scale = scale, shiftX = sx, shiftY = sy, gamma = gamma, density = density,
+            cyan = cy, magenta = ma, yellow = ye) to notes
+    }
 
     /** Choix proposés par le pilote pour un paramètre (dépendent des autres réglages). */
     suspend fun choices(ctx: Context, param: String, sel: Map<String, String>): List<Choice> = withContext(Dispatchers.IO) {
@@ -94,9 +210,12 @@ object Gutenprint {
         ctx: Context, ip: String, uri: Uri, mime: String,
         sel: Map<String, String>, borderless: Boolean, fill: Boolean, dpi: Int,
         onStep: (String) -> Unit,
+        truePage: Boolean = false,
     ): String = withContext(Dispatchers.IO) {
         init(ctx)
-        val k = kv(sel, borderless)
+        val t = tune(ctx)
+        val dpi = if (t.dpi > 0) t.dpi else dpi
+        val k = kv(sel, borderless, t)
         val a = nArea(k)    // largeur, hauteur page, gauche, droite, bas, haut (points)
         val wPt = a[3] - a[2]; val hPt = a[4] - a[5]
         if (wPt <= 0 || hPt <= 0) throw IOException("format refusé par le pilote")
@@ -109,11 +228,21 @@ object Gutenprint {
                 out.outputStream().buffered().use { o ->
                     val page = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
                     val rgb = ByteArray(w * h * 3)
+                    // Décalage (mm) et échelle réglés dans « Réglage du pilote ».
+                    val px = dpi / 25.4f
+                    // truePage : la feuille entière (taille réelle), marges comprises ; sinon la zone imprimable.
+                    val base = if (truePage) RectF(
+                        (-a[2] * dpi / 72).toFloat(), (-a[5] * dpi / 72).toFloat(),
+                        ((a[0] - a[2]) * dpi / 72).toFloat(), ((a[1] - a[5]) * dpi / 72).toFloat(),
+                    ) else RectF(0f, 0f, w.toFloat(), h.toFloat())
+                    val cx = base.centerX() + t.shiftX * px; val cy = base.centerY() + t.shiftY * px
+                    val bw = base.width() * t.scale / 2; val bh = base.height() * t.scale / 2
+                    val box = RectF(cx - bw, cy - bh, cx + bw, cy + bh)
                     val row = IntArray(w)
                     for (i in 0 until pages.count) {
                         withContext(Dispatchers.Main) { onStep("préparation page ${i + 1}/${pages.count}") }
                         page.eraseColor(Color.WHITE)
-                        pages.drawInto(i, Canvas(page), RectF(0f, 0f, w.toFloat(), h.toFloat()), fill)
+                        pages.drawInto(i, Canvas(page), box, fill)
                         var p = 0
                         for (y in 0 until h) {
                             page.getPixels(row, 0, w, 0, y, w, 1)
@@ -132,6 +261,7 @@ object Gutenprint {
             // comme pour les commandes d'entretien.
             val job = listOf(CanonTools.XML_START, CanonTools.XML_MODE) + chunks(out) + listOf(CanonTools.XML_END)
             Bjnp.send(ip, job, title = "CanonHub", timeout = 120_000)
+            if (!t.diag) return@withContext "Envoyé à l'imprimante par le pilote intégré (${out.length() / 1024} Ko)."
             // Diagnostic : début du flux (XML Canon + commandes) et état de l'imprimante 3 s après.
             val head = out.inputStream().use { val b = ByteArray(600); val n = it.read(b); b.copyOf(maxOf(n, 0)) }
             val txt = head.map { val c = it.toInt() and 0xFF; if (c in 32..126) c.toChar() else if (c == 0x1B) '␛' else '·' }.joinToString("")

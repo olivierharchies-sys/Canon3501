@@ -519,7 +519,7 @@ fun AppCounters() {
 // ---------- Réglages ----------
 
 @Composable
-fun SettingsScreen(m: Modifier, prefs: PrinterPrefs, ip: String, onSave: (String) -> Unit, onCalib: () -> Unit = {}) {
+fun SettingsScreen(m: Modifier, prefs: PrinterPrefs, ip: String, onSave: (String) -> Unit, onGpTune: () -> Unit = {}, onCalib: () -> Unit = {}) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     var text by remember { mutableStateOf(ip) }
@@ -536,6 +536,7 @@ fun SettingsScreen(m: Modifier, prefs: PrinterPrefs, ip: String, onSave: (String
     var tree by remember { mutableStateOf(prefs.exportTree) }
     var autoClass by remember { mutableStateOf(prefs.autoClass) }
     var calibSet by remember { mutableStateOf(!Calib.state.isDefault()) }
+    var gpTuned by remember { mutableStateOf(!Gutenprint.tune(ctx).isDefault()) }
     val treePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { u ->
         if (u != null) {
             runCatching {
@@ -648,6 +649,18 @@ fun SettingsScreen(m: Modifier, prefs: PrinterPrefs, ip: String, onSave: (String
             Hint("Imprime une mire, la relit au scanner et ajuste taille réelle, blancs, gris et couleurs.")
             if (calibSet) {
                 TextButton(onClick = { Calib.reset(ctx); calibSet = false; msg = "Étalonnage remis par défaut." }) {
+                    Text("Réinitialiser par défaut")
+                }
+            }
+        }
+
+        Section(
+            "Réglage du pilote intégré", Icons.Filled.Print, sub = if (gpTuned) "Réglages personnalisés" else "Réglages par défaut",
+            trailing = { TextButton(onClick = onGpTune) { Text("Ouvrir") } },
+        ) {
+            Hint("En cas de problème d'impression avec le pilote Gutenprint. Page d'essai et paramétrage automatique inclus.")
+            if (gpTuned) {
+                TextButton(onClick = { Gutenprint.saveTune(ctx, Gutenprint.Tune()); gpTuned = false; msg = "Réglages du pilote remis par défaut." }) {
                     Text("Réinitialiser par défaut")
                 }
             }

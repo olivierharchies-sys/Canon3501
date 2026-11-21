@@ -124,7 +124,8 @@ class MainActivity : ComponentActivity() {
 enum class Screen(val title: String) {
     Home("Canon G3000"), Print("Imprimer"), Scan("Numériser"), Copy("Copier"),
     Ink("Encre et état"), Maintenance("Entretien"), Queue("File d'attente"),
-    Info("Infos imprimante"), Settings("Réglages"), History("Documents"), Calib("Étalonnage")
+    Info("Infos imprimante"), Settings("Réglages"), History("Documents"), Calib("Étalonnage"),
+    GpTune("Réglage du pilote")
 }
 
 fun sharedUri(i: Intent): Uri? = when (i.action) {
@@ -138,7 +139,7 @@ fun App(prefs: PrinterPrefs, incoming: Intent?, consumed: () -> Unit) {
     var screen by remember { mutableStateOf(Screen.Home) }
     var ip by remember { mutableStateOf(prefs.ip) }
     var shared by remember { mutableStateOf<Uri?>(null) }
-    BackHandler(enabled = screen != Screen.Home) { screen = if (screen == Screen.Calib) Screen.Settings else Screen.Home }
+    BackHandler(enabled = screen != Screen.Home) { screen = if (screen == Screen.Calib || screen == Screen.GpTune) Screen.Settings else Screen.Home }
 
     // Rappel d'entretien actif par défaut : demande l'autorisation des notifications une fois.
     val ctx0 = LocalContext.current
@@ -167,7 +168,7 @@ fun App(prefs: PrinterPrefs, incoming: Intent?, consumed: () -> Unit) {
             title = { Text(screen.title) },
             navigationIcon = {
                 if (screen != Screen.Home) {
-                    IconButton(onClick = { screen = if (screen == Screen.Calib) Screen.Settings else Screen.Home }) {
+                    IconButton(onClick = { screen = if (screen == Screen.Calib || screen == Screen.GpTune) Screen.Settings else Screen.Home }) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, "Retour")
                     }
                 }
@@ -203,7 +204,8 @@ fun App(prefs: PrinterPrefs, incoming: Intent?, consumed: () -> Unit) {
             Screen.Maintenance -> MaintenanceScreen(m, prefs, ip, go)
             Screen.Queue -> if (ip.isBlank()) needIp() else QueueScreen(m, ip)
             Screen.Info -> if (ip.isBlank()) needIp() else InfoScreen(m, ip)
-            Screen.Settings -> SettingsScreen(m, prefs, ip, setIp) { go(Screen.Calib) }
+            Screen.Settings -> SettingsScreen(m, prefs, ip, setIp, onGpTune = { go(Screen.GpTune) }) { go(Screen.Calib) }
+            Screen.GpTune -> GpTuneScreen(m, prefs, ip)
             Screen.Calib -> CalibScreen(m, ip)
             Screen.History -> HistoryScreen(m)
         }

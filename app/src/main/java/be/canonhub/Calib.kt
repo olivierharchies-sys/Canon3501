@@ -287,6 +287,10 @@ object Calib {
         val scaleX: Float, val scaleY: Float, val white: IntArray, val gains: FloatArray,
         val curve: List<Int>, val warnings: List<String>,
         val patchMeas: List<IntArray>, val matrix: FloatArray,
+        /** Gris de la rampe (R, V, B après balance des blancs), 0 → 100 %. */
+        val greys: List<IntArray> = emptyList(),
+        /** Centre des 4 repères sur la vitre (mm) ; null si mire posée à l'envers. */
+        val centre: Pair<Float, Float>? = null,
     )
 
     val patchNames get() = patches
@@ -355,7 +359,8 @@ object Calib {
         fun lum(c: IntArray) = (c[0] * 30 + c[1] * 59 + c[2] * 11) / 100
         fun rampRaw() = (0..10).map { k -> at(rampX(k), RAMP_Y).let { (x, y) -> center(b, x, y, rad) } }
         var raw = rampRaw()
-        if (lum(raw[0]) > lum(raw[10])) {
+        val upright = lum(raw[0]) <= lum(raw[10])
+        if (!upright) {
             // Mire posée à l'envers (180°) : on échange les coins.
             val a = tl; tl = br; br = a
             val c = tr; tr = bl; bl = c
@@ -385,7 +390,9 @@ object Calib {
         val meas = raw.map { g(it) } + pcG
         val want = ramp.map { intArrayOf(it, it, it) } + patchColors.map { intArrayOf(AColor.red(it), AColor.green(it), AColor.blue(it)) }
         val mx = fitMatrix(meas, want, curveLut(curve))
-        return Report(sx, sy, white, gains, curve, warn, pcG, mx)
+        val centre = if (upright) (tl.first + tr.first + bl.first + br.first) / 4 * mmPx to
+            (tl.second + tr.second + bl.second + br.second) / 4 * mmPx else null
+        return Report(sx, sy, white, gains, curve, warn, pcG, mx, raw.map { g(it) }, centre)
     }
 }
 
