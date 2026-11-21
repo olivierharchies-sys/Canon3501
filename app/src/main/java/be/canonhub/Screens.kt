@@ -306,7 +306,15 @@ fun MaintenanceScreen(m: Modifier, prefs: PrinterPrefs, ip: String, go: (Screen)
             Hint("Si rien ne se passe, changez de mode ou utilisez le menu de l'imprimante.")
         }
         if (busy != null) LinearProgressIndicator(Modifier.fillMaxWidth())
-        if (msg.isNotEmpty()) Text(msg)
+        if (msg.isNotEmpty()) {
+            val clip = androidx.compose.ui.platform.LocalClipboardManager.current
+            val ctx = androidx.compose.ui.platform.LocalContext.current
+            androidx.compose.foundation.text.selection.SelectionContainer { Text(msg) }
+            TextButton(onClick = {
+                clip.setText(androidx.compose.ui.text.AnnotatedString(listOf(msg, watch, raw).filter { it.isNotEmpty() }.joinToString("\n")))
+                android.widget.Toast.makeText(ctx, "Message copié", android.widget.Toast.LENGTH_SHORT).show()
+            }) { Text("Copier le message") }
+        }
         if (watch.isNotEmpty()) Text("État : $watch", style = MaterialTheme.typography.titleSmall)
         if (raw.isNotEmpty()) androidx.compose.foundation.text.selection.SelectionContainer {
             Text("Imprimante :\n$raw", style = MaterialTheme.typography.bodySmall)
