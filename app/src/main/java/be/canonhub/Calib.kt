@@ -108,7 +108,38 @@ object Calib {
             p.getString("matrix", "")!!.split(',').mapNotNull { it.toFloatOrNull() }.takeIf { it.size == 12 }?.toFloatArray() ?: IDENT.copyOf(),
             p.getBoolean("colorOn", false),
         )
+        ScanRef.load(ctx)
         rebuild()
+    }
+
+    /**
+     * Numérise la mire posée sur la vitre et l'analyse. Référence scanner appliquée,
+     * balance des blancs non (elle est recalculée sur le papier de la mire).
+     */
+    suspend fun scanChart(ctx: Context, ip: String): Report {
+        val keep = state
+        save(ctx, keep.copy(scanOn = false))
+        val jpg = try { ScanService.keep(ctx) { Escl.scan(ip, 300, true, Area.A4) } } finally { save(ctx, keep) }
+        return withContext(Dispatchers.Default) {
+            val o = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            android.graphics.BitmapFactory.decodeByteArray(jpg, 0, jpg.size, o)
+            val b = Images.decode(jpg, 4000) ?: throw IOException("image illisible")
+            analyze(b, 300f * b.width / o.outWidth.coerceAtLeast(1))
+        }
+    }
+
+    /** Applique le résultat de la mire aux copies et au scanner ; échelle conservée si mire du pilote. */
+    fun applyReport(ctx: Context, r: Report, viaDriver: Boolean) {
+        val old = state
+        save(
+            ctx,
+            State(
+                if (viaDriver) old.scaleX else r.scaleX, if (viaDriver) old.scaleY else r.scaleY,
+                r.gains, r.curve,
+                printOn = if (viaDriver) old.printOn else true, scanOn = true, copyOn = true,
+                date = System.currentTimeMillis(), matrix = r.matrix, colorOn = true,
+            ),
+        )
     }
 
     fun save(ctx: Context, s: State) {
@@ -126,11 +157,28 @@ object Calib {
 
     fun reset(ctx: Context) = save(ctx, State())
 
+    /** Scan brut demandé (mesure de la référence du scanner) : aucune LUT. */
+    @Volatile private var rawMode = false
+
+    /** Exécute [block] avec des scans bruts (sans référence scanner ni balance des blancs). */
+    suspend fun <T> raw(block: suspend () -> T): T {
+        rawMode = true; rebuild()
+        try { return block() } finally { rawMode = false; rebuild() }
+    }
+
+    fun refresh() = rebuild()
+
     private fun rebuild() {
         val s = state
-        scanLut = if (s.scanOn && s.gains.any { it != 1f }) {
-            Array(3) { c -> IntArray(256) { v -> (v * s.gains[c]).roundToInt().coerceIn(0, 255) } }
-        } else null
+        // Référence scanner d'abord (réponse du capteur), puis balance des blancs.
+        val ref = if (rawMode) null else ScanRef.lut
+        val g = !rawMode && s.scanOn && s.gains.any { it != 1f }
+        scanLut = if (ref == null && !g) null else Array(3) { c ->
+            IntArray(256) { v ->
+                val r = ref?.get(c)?.get(v) ?: v
+                if (g) (r * s.gains[c]).roundToInt().coerceIn(0, 255) else r
+            }
+        }
         copyLut = if (s.copyOn && s.curve.size == 11) curveLut(s.curve) else null
         copyMatrix = if (s.colorOn && !s.matrix.contentEquals(IDENT)) s.matrix else null
     }
@@ -410,6 +458,8 @@ fun CalibScreen(m: Modifier, ip: String) {
     val prefs = remember { PrinterPrefs(ctx) }
     // Mire imprimée par le pilote : son échelle relève de « Réglage du pilote », pas de la fenêtre Android.
     var viaDriver by remember { mutableStateOf(Gutenprint.available && ip.isNotBlank()) }
+    var wizard by remember { mutableStateOf(false) }
+    if (wizard) CalibWizard(ip, prefs) { wizard = false; st = Calib.state; sx = st.scaleX; sy = st.scaleY }
 
     var askReset by remember { mutableStateOf(false) }
     if (askReset) {
@@ -432,7 +482,13 @@ fun CalibScreen(m: Modifier, ip: String) {
     Column(m.padding(16.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Section("Étalonnage intelligent", Icons.Filled.Build, sub = if (st.date == 0L) "Jamais étalonné" else "Dernier : ${java.text.SimpleDateFormat("dd/MM/yyyy", java.util.Locale.FRANCE).format(java.util.Date(st.date))}") {
             Hint("L'appli imprime une mire, la relit au scanner et calcule les corrections : taille réelle à l'impression, blanc du scanner, rendu des gris en copie. Elle signale aussi une couleur pâle.")
+            Button(enabled = !busy, modifier = Modifier.fillMaxWidth(), onClick = { wizard = true }) {
+                Text("Assistant d'étalonnage complet")
+            }
+            Hint("Recommandé : enchaîne automatiquement toutes les étapes dans le bon ordre.")
         }
+        CalibGuide()
+        ScanRefSection(ip)
         Section("1. Imprimer la mire", Icons.Filled.Print, sub = "Papier A4 blanc ordinaire") {
             Button(enabled = !busy, modifier = Modifier.fillMaxWidth(), onClick = {
                 if (Gutenprint.available && ip.isNotBlank()) {
@@ -468,21 +524,7 @@ fun CalibScreen(m: Modifier, ip: String) {
                 scope.launch {
                     busy = true; msg = "Numérisation de la mire…"; report = null
                     msg = try {
-                        // Scan brut, sans correction déjà appliquée.
-                        val keep = Calib.state
-                        Calib.save(ctx, keep.copy(scanOn = false))
-                        val jpg = try {
-                            ScanService.keep(ctx) { Escl.scan(ip, 300, true, Area.A4) }
-                        } finally {
-                            Calib.save(ctx, keep)
-                        }
-                        msg = "Analyse…"
-                        report = withContext(Dispatchers.Default) {
-                            val o = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                            android.graphics.BitmapFactory.decodeByteArray(jpg, 0, jpg.size, o)
-                            val b = Images.decode(jpg, 4000) ?: throw IOException("image illisible")
-                            Calib.analyze(b, 300f * b.width / o.outWidth.coerceAtLeast(1))
-                        }
+                        report = Calib.scanChart(ctx, ip)
                         "Analyse terminée."
                     } catch (e: Exception) {
                         "Échec : ${e.message}"
@@ -520,15 +562,8 @@ fun CalibScreen(m: Modifier, ip: String) {
                 }
                 r.warnings.forEach { Pill(it, MaterialTheme.colorScheme.error) }
                 Button(modifier = Modifier.fillMaxWidth(), onClick = {
-                    val old = Calib.state
-                    commit(
-                        Calib.State(
-                            if (viaDriver) old.scaleX else r.scaleX, if (viaDriver) old.scaleY else r.scaleY,
-                            r.gains, r.curve,
-                            printOn = if (viaDriver) old.printOn else true, scanOn = true, copyOn = true,
-                            date = System.currentTimeMillis(), matrix = r.matrix, colorOn = true,
-                        ),
-                    )
+                    Calib.applyReport(ctx, r, viaDriver)
+                    st = Calib.state; sx = st.scaleX; sy = st.scaleY
                     report = null
                     msg = if (viaDriver) "Étalonnage appliqué (échelle : voir Réglage du pilote)." else "Étalonnage appliqué."
                 }) { Text("Appliquer les corrections") }

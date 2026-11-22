@@ -558,6 +558,10 @@ fun SettingsScreen(m: Modifier, prefs: PrinterPrefs, ip: String, onSave: (String
     var autoClass by remember { mutableStateOf(prefs.autoClass) }
     var calibSet by remember { mutableStateOf(!Calib.state.isDefault()) }
     var gpTuned by remember { mutableStateOf(!Gutenprint.tune(ctx).isDefault()) }
+    var wizard by remember { mutableStateOf(false) }
+    if (wizard) CalibWizard(ip, prefs) {
+        wizard = false; calibSet = !Calib.state.isDefault(); gpTuned = !Gutenprint.tune(ctx).isDefault()
+    }
     val treePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { u ->
         if (u != null) {
             runCatching {
@@ -668,6 +672,7 @@ fun SettingsScreen(m: Modifier, prefs: PrinterPrefs, ip: String, onSave: (String
             trailing = { TextButton(onClick = onCalib) { Text("Ouvrir") } },
         ) {
             Hint("Imprime une mire, la relit au scanner et ajuste taille réelle, blancs, gris et couleurs.")
+            Button(onClick = { wizard = true }, modifier = Modifier.fillMaxWidth()) { Text("Assistant d'étalonnage complet") }
             if (calibSet) {
                 TextButton(onClick = { Calib.reset(ctx); calibSet = false; msg = "Étalonnage remis par défaut." }) {
                     Text("Réinitialiser par défaut")

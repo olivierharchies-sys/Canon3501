@@ -51,6 +51,8 @@ fun GpTuneScreen(m: Modifier, prefs: PrinterPrefs, ip: String) {
     var askReset by remember { mutableStateOf(false) }
     var proposal by remember { mutableStateOf<Pair<Gutenprint.Tune, List<String>>?>(null) }
     fun set(n: Gutenprint.Tune) { t = n; Gutenprint.saveTune(ctx, n) }
+    var wizard by remember { mutableStateOf(false) }
+    if (wizard) CalibWizard(ip, prefs) { wizard = false; t = Gutenprint.tune(ctx) }
 
     LaunchedEffect(Unit) {
         if (Gutenprint.available) runCatching {
@@ -73,6 +75,11 @@ fun GpTuneScreen(m: Modifier, prefs: PrinterPrefs, ip: String) {
         if (!Gutenprint.available) {
             Hint("Le pilote Gutenprint n'a pas été compilé dans cet APK.")
             return@Column
+        }
+
+        Section("Assistant d'étalonnage", Icons.Filled.AutoFixHigh, sub = "Imprimante, scanner et copie, étape par étape") {
+            Button(enabled = !busy, modifier = Modifier.fillMaxWidth(), onClick = { wizard = true }) { Text("Lancer l'assistant complet") }
+            Hint("Guide détaillé : Réglages > Étalonnage.")
         }
 
         Section("Page d'essai", Icons.Filled.Print, sub = "Mire en taille réelle, avec les réglages ci-dessous") {
