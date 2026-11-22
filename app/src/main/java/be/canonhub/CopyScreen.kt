@@ -120,6 +120,8 @@ fun CopyScreen(m: Modifier, prefs: PrinterPrefs, ip: String) {
     var filt by remember { mutableStateOf(Filter.None) }
     var batch by remember { mutableStateOf(prefs.copyBatch) }
     var layout by remember { mutableStateOf(prefs.copyLayout) }
+    var straight by remember { mutableStateOf(prefs.bool("copyStraight", false)) }
+    var corr by remember { mutableStateOf(Fix()) }
     var queue by remember { mutableStateOf<List<CopyItem>>(emptyList()) }
     var sel by remember { mutableIntStateOf(0) }
     val drv = rememberDriver(prefs, route == Route.Driver)
@@ -156,7 +158,7 @@ fun CopyScreen(m: Modifier, prefs: PrinterPrefs, ip: String) {
         val n = withContext(Dispatchers.Default) {
             val doc = android.graphics.pdf.PdfDocument()
             var k = 0
-            CopyLayout.render(items, layout, out.target(), filt) { b ->
+            CopyLayout.render(items, layout, out.target(), filt, straight, corr) { b ->
                 k++
                 if (k == 1) first = b
                 CopyLayout.addPdfPage(doc, b, k, fix)
@@ -297,7 +299,11 @@ fun CopyScreen(m: Modifier, prefs: PrinterPrefs, ip: String) {
             if (out.fmt != Fmt.Original) Hint("Format imposé : une feuille par document, redressé et recadré.")
         }
 
-        Fold("Retouche", Icons.Filled.AutoFixHigh, sub = filt.label, accent = Brand.Copy[1]) {
+        Fold("Retouche", Icons.Filled.AutoFixHigh, sub = filt.label + (if (corr.mode != Enhance.Mode.None) " · ${corr.mode.label}" else "") + if (straight) " · redressé" else "", accent = Brand.Copy[1]) {
+            Switcher("Redresser automatiquement", straight, "Document posé de travers remis droit, taille réelle gardée.") {
+                straight = it; prefs.setBool("copyStraight", it)
+            }
+            FixPicker(corr) { corr = it }
             FilterChips(filt) { filt = it }
             if (filt == Filter.Doc || filt == Filter.BW) Hint("Fond blanchi : économise l'encre.")
         }

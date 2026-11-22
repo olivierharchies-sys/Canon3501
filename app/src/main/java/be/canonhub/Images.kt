@@ -24,6 +24,9 @@ enum class Filter(val label: String) {
     Sepia("Sépia"), Vintage("Vintage"), Warm("Chaud"), Cold("Froid"), Vivid("Éclatant"), Faded("Délavé"), Invert("Négatif"),
 }
 
+/** Corrections automatiques : mode couleur, dépoussiérage, netteté. */
+data class Fix(val mode: Enhance.Mode = Enhance.Mode.None, val dust: Boolean = false, val sharp: Boolean = false)
+
 /** Page numérisée : JPEG brut, résolution, rotation en degrés. */
 class Page(val bytes: ByteArray, val dpi: Int, val rot: Int = 0) {
     fun rotated(): Page = Page(bytes, dpi, (rot + 90) % 360)
@@ -90,52 +93,28 @@ object Images {
         return Bitmap.createBitmap(src, rect.left, rect.top, rect.width(), rect.height())
     }
 
-    /** Angle d'inclinaison (degrés) par profil de projection des pixels sombres ; 0 si incertain. */
-    fun skewAngle(src: Bitmap): Float {
-        val sw = 500
-        val k = src.width.toFloat() / sw
-        val sh = (src.height / k).toInt().coerceAtLeast(1)
-        val small = Bitmap.createScaledBitmap(src, sw, sh, true)
-        val px = IntArray(sw * sh)
-        small.getPixels(px, 0, sw, 0, 0, sw, sh)
-        val xs = ArrayList<Int>(); val ys = ArrayList<Int>()
-        for (y in 0 until sh) for (x in 0 until sw) {
-            val c = px[y * sw + x]
-            if ((AColor.red(c) + AColor.green(c) + AColor.blue(c)) / 3 < 140) { xs += x; ys += y }
-        }
-        if (xs.size < 300) return 0f
-        val step = maxOf(1, xs.size / 30000)
-        fun score(deg: Float): Double {
-            val r = Math.toRadians(deg.toDouble())
-            val cs = kotlin.math.cos(r); val sn = kotlin.math.sin(r)
-            val off = sw
-            val hist = IntArray(sh + 2 * sw)
-            var i = 0
-            while (i < xs.size) {
-                val yy = (ys[i] * cs - xs[i] * sn).toInt() + off
-                if (yy in hist.indices) hist[yy]++
-                i += step
-            }
-            var sum = 0.0
-            for (v in hist) sum += v.toDouble() * v
-            return sum
-        }
-        val base = score(0f)
-        var best = 0f; var bestS = base
-        var a = -6f
-        while (a <= 6f) {
-            val sc = score(a)
-            if (sc > bestS) { bestS = sc; best = a }
-            a += 0.25f
-        }
-        return if (kotlin.math.abs(best) >= 0.3f && bestS > base * 1.1) best else 0f
+    /** Pixels d'une copie réduite à [sw] de large, et le facteur d'échelle. */
+    private fun small(src: Bitmap, sw: Int): Pair<IntArray, Pair<Int, Float>> {
+        val w = minOf(sw, src.width)
+        val k = src.width.toFloat() / w
+        val h = (src.height / k).toInt().coerceAtLeast(1)
+        val sm = Bitmap.createScaledBitmap(src, w, h, true)
+        val px = IntArray(w * h)
+        sm.getPixels(px, 0, w, 0, 0, w, h)
+        return px to (w to k)
     }
 
-    /** Redresse un document posé de travers (fond blanc). */
+    /** Inclinaison du contenu en degrés (sens horaire) ; 0 si incertain. */
+    fun skewAngle(src: Bitmap): Float {
+        val (px, d) = small(src, 600)
+        return Detect.skew(px, d.first, px.size / d.first)
+    }
+
+    /** Redresse un document posé de travers ; le cadre s'agrandit (coins blancs). */
     fun deskew(src: Bitmap): Bitmap {
         val a = skewAngle(src)
         if (a == 0f) return src
-        val m = android.graphics.Matrix().apply { setRotate(a) }
+        val m = android.graphics.Matrix().apply { setRotate(-a) }
         val r = RectF(0f, 0f, src.width.toFloat(), src.height.toFloat())
         m.mapRect(r)
         val out = Bitmap.createBitmap(r.width().toInt(), r.height().toInt(), Bitmap.Config.ARGB_8888)
@@ -146,13 +125,96 @@ object Images {
         return out
     }
 
+    /** Redresse en gardant la taille de l'image (copie A4 : échelle conservée). */
+    fun straighten(src: Bitmap): Bitmap {
+        val a = skewAngle(src)
+        if (a == 0f) return src
+        val out = Bitmap.createBitmap(src.width, src.height, Bitmap.Config.ARGB_8888)
+        val c = Canvas(out)
+        c.drawColor(AColor.WHITE)
+        c.rotate(-a, src.width / 2f, src.height / 2f)
+        c.drawBitmap(src, 0f, 0f, Paint(Paint.FILTER_BITMAP_FLAG))
+        return out
+    }
+
+    /** Découpe un rectangle orienté (coordonnées réduites × [k]) en image droite. */
+    private fun extract(src: Bitmap, r: RotRect, k: Float): Bitmap {
+        val w = (r.w * k).toInt().coerceAtLeast(1); val h = (r.h * k).toInt().coerceAtLeast(1)
+        val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val m = android.graphics.Matrix().apply {
+            setTranslate(-r.cx * k, -r.cy * k)
+            postRotate(-r.angle)
+            postTranslate(w / 2f, h / 2f)
+        }
+        val c = Canvas(out)
+        c.drawColor(AColor.WHITE)
+        c.drawBitmap(src, m, Paint(Paint.FILTER_BITMAP_FLAG))
+        return out
+    }
+
+    /** Documents posés sur la vitre, chacun découpé et redressé ; vide si aucun. */
+    fun documents(src: Bitmap): List<Bitmap> {
+        val (px, d) = small(src, 600)
+        val w = d.first; val h = px.size / w
+        val found = Detect.findDocs(px, w, h)
+        // Un seul objet couvrant presque toute la vitre : rien à découper.
+        if (found.size == 1 && found[0].w * found[0].h > w * h * 0.92f) return emptyList()
+        return found.map { extract(src, it, d.second) }
+    }
+
+    /** Page blanche (rien d'imprimé). */
+    fun isBlank(src: Bitmap): Boolean {
+        val (px, d) = small(src, 400)
+        return Detect.isBlank(px, d.first, px.size / d.first)
+    }
+
+    /** Applique une opération ligne à ligne vers une nouvelle image. */
+    private fun stream(src: Bitmap, op: (Int, Int, (Int, IntArray) -> Unit, (Int, IntArray) -> Unit) -> Unit): Bitmap {
+        val w = src.width; val h = src.height
+        val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        op(w, h, { y, d -> src.getPixels(d, 0, w, 0, y, w, 1) }, { y, d -> out.setPixels(d, 0, w, 0, y, w, 1) })
+        return out
+    }
+
+    /** Corrections automatiques (vieilles photos, documents). */
+    fun fix(src: Bitmap, f: Fix): Bitmap {
+        var b = src
+        if (f.dust) b = stream(b) { w, h, i, o -> Enhance.dust(w, h, i, o) }
+        when (f.mode) {
+            Enhance.Mode.None -> {}
+            Enhance.Mode.Document -> b = applyFilter(b, Filter.Doc)
+            else -> {
+                val (px, _) = small(b, 600)
+                Enhance.plan(px, f.mode)?.let { lut ->
+                    b = stream(b) { w, h, i, o ->
+                        val r = IntArray(w)
+                        for (y in 0 until h) { i(y, r); Enhance.apply(r, lut); o(y, r) }
+                    }
+                }
+            }
+        }
+        val amt = when {
+            f.mode == Enhance.Mode.Document -> if (f.sharp) 1.2f else 0.7f
+            f.sharp -> 0.6f
+            else -> 0f
+        }
+        if (amt > 0f) b = stream(b) { w, h, i, o -> Enhance.sharpen(w, h, amt, i, o) }
+        return b
+    }
+
     fun process(
         bytes: ByteArray, maxDim: Int, crop: Boolean, bright: Float, contrast: Float,
-        filt: Filter = Filter.None, rot: Int = 0,
+        filt: Filter = Filter.None, rot: Int = 0, straight: Boolean = crop, fix: Fix = Fix(),
     ): Bitmap? {
         var b = decode(bytes, maxDim) ?: return null
         b = rotate(b, rot)
-        if (crop) b = autoCrop(deskew(b))
+        b = when {
+            crop && straight -> autoCrop(deskew(b))
+            crop -> autoCrop(b)
+            straight -> straighten(b)
+            else -> b
+        }
+        b = Images.fix(b, fix)
         b = applyFilter(b, filt)
         return adjust(b, bright, contrast)
     }
@@ -371,56 +433,14 @@ object Images {
         return out
     }
 
-    /** Sépare plusieurs photos posées sur la vitre ; liste vide si moins de deux trouvées. */
-    fun splitPhotos(src: Bitmap): List<Bitmap> {
-        val sw = 400
-        val k = src.width.toFloat() / sw
-        val sh = (src.height / k).toInt().coerceAtLeast(1)
-        val small = Bitmap.createScaledBitmap(src, sw, sh, true)
-        val px = IntArray(sw * sh)
-        small.getPixels(px, 0, sw, 0, 0, sw, sh)
-        val ink = BooleanArray(px.size) { i ->
-            val c = px[i]
-            val r = AColor.red(c); val g = AColor.green(c); val b = AColor.blue(c)
-            (r + g + b) / 3 < 230 || maxOf(r, g, b) - minOf(r, g, b) > 30
-        }
-        // Dilatation : relie les zones claires d'une même photo.
-        val mask = BooleanArray(px.size)
-        for (y in 0 until sh) for (x in 0 until sw) if (ink[y * sw + x]) {
-            for (dy in -3..3) for (dx in -3..3) {
-                val yy = y + dy; val xx = x + dx
-                if (yy in 0 until sh && xx in 0 until sw) mask[yy * sw + xx] = true
-            }
-        }
-        val seen = BooleanArray(px.size)
-        val boxes = ArrayList<Rect>()
-        val stack = IntArray(px.size)
-        for (start in px.indices) {
-            if (!mask[start] || seen[start]) continue
-            var top = 0; stack[top++] = start; seen[start] = true
-            var l = sw; var t = sh; var r = -1; var b = -1; var n = 0
-            while (top > 0) {
-                val i = stack[--top]; n++
-                val x = i % sw; val y = i / sw
-                if (x < l) l = x; if (x > r) r = x; if (y < t) t = y; if (y > b) b = y
-                if (x > 0 && mask[i - 1] && !seen[i - 1]) { seen[i - 1] = true; stack[top++] = i - 1 }
-                if (x < sw - 1 && mask[i + 1] && !seen[i + 1]) { seen[i + 1] = true; stack[top++] = i + 1 }
-                if (y > 0 && mask[i - sw] && !seen[i - sw]) { seen[i - sw] = true; stack[top++] = i - sw }
-                if (y < sh - 1 && mask[i + sw] && !seen[i + sw]) { seen[i + sw] = true; stack[top++] = i + sw }
-            }
-            val bw = r - l + 1; val bh = b - t + 1
-            if (bw >= 20 && bh >= 20 && n >= px.size / 100) boxes += Rect(l + 3, t + 3, r - 2, b - 2)
-        }
-        if (boxes.size < 2) return emptyList()
-        boxes.sortWith(compareBy<Rect>({ it.top / 20 }, { it.left }))
-        return boxes.mapNotNull { bx ->
-            val rr = Rect(
-                (bx.left * k).toInt().coerceIn(0, src.width - 1), (bx.top * k).toInt().coerceIn(0, src.height - 1),
-                (bx.right * k).toInt().coerceIn(1, src.width), (bx.bottom * k).toInt().coerceIn(1, src.height),
-            )
-            if (rr.width() <= 0 || rr.height() <= 0) null
-            else Bitmap.createBitmap(src, rr.left, rr.top, rr.width(), rr.height())
-        }
+    /** Sépare plusieurs documents posés sur la vitre ; liste vide si moins de deux trouvés. */
+    fun splitPhotos(src: Bitmap): List<Bitmap> = documents(src).takeIf { it.size >= 2 } ?: emptyList()
+
+    /** Facteur de réduction appliqué par [decode] pour [maxDim]. */
+    fun sampleFor(w: Int, h: Int, maxDim: Int): Int {
+        var s = 1
+        while (maxOf(w, h) / (s * 2) >= maxDim) s *= 2
+        return s
     }
 
     /** Nombre de pages d'un PDF. */

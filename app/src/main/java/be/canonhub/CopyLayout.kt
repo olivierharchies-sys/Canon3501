@@ -33,7 +33,7 @@ object CopyLayout {
         return b to it.page.dpi * b.width.toFloat() / o.outWidth.coerceAtLeast(1)
     }
 
-    private fun prep(b: Bitmap, filt: Filter): Bitmap = Calib.forCopy(Images.applyFilter(b, filt))
+    private fun prep(b: Bitmap, filt: Filter, fix: Fix = Fix()): Bitmap = Calib.forCopy(Images.applyFilter(Images.fix(b, fix), filt))
 
     private fun fit(c: Canvas, b: Bitmap, r: RectF) {
         val s = minOf(r.width() / b.width, r.height() / b.height)
@@ -46,24 +46,25 @@ object CopyLayout {
      * Compose les feuilles A4 (300 dpi) et les passe une à une à [sink].
      * [target] : format imposé (cm) ou null.
      */
-    fun render(items: List<CopyItem>, layout: PageLayout, target: Pair<Float, Float>?, filt: Filter, sink: (Bitmap) -> Unit) {
+    fun render(items: List<CopyItem>, layout: PageLayout, target: Pair<Float, Float>?, filt: Filter, straight: Boolean = false, fix: Fix = Fix(), sink: (Bitmap) -> Unit) {
+        fun st(b: Bitmap) = if (straight) Images.straighten(b) else b
         val sheets = items.filter { it.sheet }
         val docs = items.filterNot { it.sheet }
-        sheets.forEach { it2 -> load(it2)?.let { (b, _) -> sink(prep(b, filt)) } }
+        sheets.forEach { it2 -> load(it2)?.let { (b, _) -> sink(prep(b, filt, fix)) } }
         if (docs.isEmpty()) return
         when {
             target != null -> docs.forEach { d ->
-                load(d)?.let { (b, _) -> sink(prep(Formats.onA4(Images.autoCrop(Images.deskew(b)), target), filt)) }
+                load(d)?.let { (b, _) -> sink(prep(Formats.onA4(Images.autoCrop(Images.deskew(b)), target), filt, fix)) }
             }
-            layout == PageLayout.One -> docs.forEach { d -> load(d)?.let { (b, _) -> sink(prep(b, filt)) } }
+            layout == PageLayout.One -> docs.forEach { d -> load(d)?.let { (b, _) -> sink(prep(st(b), filt, fix)) } }
             layout == PageLayout.Two -> docs.chunked(2).forEach { pair ->
                 val out = blank(); val c = Canvas(out)
                 val m = 5 * MM
                 pair.forEachIndexed { i, d ->
                     load(d)?.let { (b, _) ->
-                        val r = Images.rotate(b, 90)
+                        val r = Images.rotate(st(b), 90)
                         val top = if (i == 0) m else H / 2f + m / 2
-                        fit(c, prep(r, filt), RectF(m, top, W - m, top + H / 2f - 1.5f * m))
+                        fit(c, prep(r, filt, fix), RectF(m, top, W - m, top + H / 2f - 1.5f * m))
                     }
                 }
                 if (pair.size == 2) {
@@ -72,12 +73,12 @@ object CopyLayout {
                 }
                 sink(out)
             }
-            else -> pack(docs, filt, sink)
+            else -> pack(docs, filt, fix, sink)
         }
     }
 
     /** Rangement par étagères à taille réelle : tickets, cartes, petits documents sur le moins de feuilles possible. */
-    private fun pack(docs: List<CopyItem>, filt: Filter, sink: (Bitmap) -> Unit) {
+    private fun pack(docs: List<CopyItem>, filt: Filter, fix: Fix, sink: (Bitmap) -> Unit) {
         val m = 5 * MM; val gap = 4 * MM
         val uw = W - 2 * m; val uh = H - 2 * m
         // Recadrage et mise à 300 dpi.
@@ -92,7 +93,7 @@ object CopyLayout {
                     val s = minOf(uw / x.width, uh / x.height)
                     x = Bitmap.createScaledBitmap(x, (x.width * s).toInt(), (x.height * s).toInt(), true)
                 }
-                prep(x, filt)
+                prep(x, filt, fix)
             }
         }.sortedByDescending { it.height }
 

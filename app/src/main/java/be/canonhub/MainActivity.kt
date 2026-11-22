@@ -438,11 +438,24 @@ fun FilterChips(value: Filter, onChange: (Filter) -> Unit) {
 fun ScanScreen(m: Modifier, ip: String) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
+    val prefs0 = remember { PrinterPrefs(ctx) }
     var area by remember { mutableStateOf(Area.A4) }
     var dpi by remember { mutableIntStateOf(300) }
     var color by remember { mutableStateOf(true) }
     var crop by remember { mutableStateOf(false) }
+    var straight by remember { mutableStateOf(prefs0.bool("scanStraight", false)) }
+    var multi by remember { mutableStateOf(prefs0.bool("scanMulti", false)) }
+    var skipBlank by remember { mutableStateOf(prefs0.bool("scanSkipBlank", false)) }
+    var separate by remember { mutableStateOf(false) }
+    var type by remember { mutableStateOf(runCatching { OutType.valueOf(prefs0.str("scanType", "PDF")) }.getOrDefault(OutType.PDF)) }
+    var quality by remember { mutableIntStateOf(prefs0.int("scanQ", 85)) }
+    var nameTpl by remember { mutableStateOf(prefs0.str("scanName", Output.DEFAULT_NAME)) }
+    var protect by remember { mutableStateOf(false) }
+    var password by remember { mutableStateOf("") }
+    var estimate by remember { mutableStateOf<String?>(null) }
+    var preset by remember { mutableStateOf<Preset?>(null) }
     var filt by remember { mutableStateOf(Filter.None) }
+    var fix by remember { mutableStateOf(Fix()) }
     var bright by remember { mutableFloatStateOf(0f) }
     var contrast by remember { mutableFloatStateOf(1f) }
     var busy by remember { mutableStateOf(false) }
@@ -457,16 +470,15 @@ fun ScanScreen(m: Modifier, ip: String) {
     var out by remember { mutableStateOf(OutFmt()) }
     var detected by remember { mutableStateOf<String?>(null) }
     var askInterleave by remember { mutableStateOf(false) }
-    val prefs0 = remember { PrinterPrefs(ctx) }
     var plan by remember { mutableStateOf<SavePlan?>(null) }
     val target = out.target()
     val cur = pages.getOrNull(sel.coerceIn(0, (pages.size - 1).coerceAtLeast(0)))
 
-    LaunchedEffect(cur, crop, filt, bright, contrast) {
+    LaunchedEffect(cur, crop, straight, filt, bright, contrast, fix) {
         val p = cur
         withContext(Dispatchers.Default) {
             val dec = p?.let { Images.decode(it.bytes, 1200) }
-            val pv = p?.let { Images.process(it.bytes, 1200, crop, bright, contrast, filt, it.rot) }
+            val pv = p?.let { Images.process(it.bytes, 1200, crop, bright, contrast, filt, it.rot, straight, fix) }
             preview = pv
             detected = if (p == null || dec == null || pv == null) null else {
                 val (w, h) = Formats.physical(p.bytes, p.dpi, pv, dec.width)
@@ -475,8 +487,39 @@ fun ScanScreen(m: Modifier, ip: String) {
         }
     }
 
-    fun proc(p: Page, max: Int) = Images.process(p.bytes, max, crop, bright, contrast, filt, p.rot)
+    fun bounds(p: Page): Pair<Int, Int> {
+        val o = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        android.graphics.BitmapFactory.decodeByteArray(p.bytes, 0, p.bytes.size, o)
+        return o.outWidth to o.outHeight
+    }
+
+    // Poids estimé : recalculé après une courte pause (curseur de qualité).
+    LaunchedEffect(preview, type, quality, pages.size, target, ocrPdf, separate) {
+        kotlinx.coroutines.delay(250)
+        val pv = preview; val p = cur
+        estimate = if (pv == null || p == null) null else withContext(Dispatchers.Default) {
+            runCatching {
+                val (ow, oh) = bounds(p)
+                val k = Images.sampleFor(ow, oh, 1200).toFloat() / Images.sampleFor(ow, oh, 3508)
+                val fullPx = if (target != null) {
+                    val (w, h) = Formats.fit(pv.width, pv.height, target)
+                    (w * 300f / 2.54f).toLong() * (h * 300f / 2.54f).toLong()
+                } else (pv.width * k).toLong() * (pv.height * k).toLong()
+                val one = Output.estimatePage(pv, fullPx, type, quality, ocrPdf)
+                val files = if (separate || !type.multi) pages.size else 1
+                "≈ ${SizeEst.label(one * pages.size)}" + if (files > 1) " · $files fichiers" else ""
+            }.getOrNull()
+        }
+    }
+
+    fun proc(p: Page, max: Int) = Images.process(p.bytes, max, crop, bright, contrast, filt, p.rot, straight, fix)
     fun full(p: Page) = proc(p, 3508)
+
+    /** Résolution réelle de l'image traitée (le décodage peut réduire). */
+    fun effDpi(p: Page): Int {
+        val (ow, oh) = bounds(p)
+        return (p.dpi / Images.sampleFor(ow, oh, 3508)).coerceAtLeast(1)
+    }
 
     /** Page prête à imprimer : A4 avec l'image à la taille choisie. */
     fun printable(b: Bitmap): Bitmap = target?.let { Formats.onA4(b, it) } ?: b
@@ -486,6 +529,18 @@ fun ScanScreen(m: Modifier, ip: String) {
         if (i !in pages.indices || j !in pages.indices) return
         val l = pages.toMutableList(); val t = l[i]; l[i] = l[j]; l[j] = t
         pages = l; sel = j
+    }
+
+    fun applyPreset(pr: Preset) {
+        preset = pr; area = Area.A4; color = true; bright = 0f; contrast = 1f
+        when (pr) {
+            Preset.Photos -> { dpi = 300; multi = true; straight = true; crop = false; filt = Filter.None; fix = Fix(Enhance.Mode.Auto, dust = true); type = OutType.JPEG; quality = 95 }
+            Preset.Document -> { dpi = 300; multi = false; straight = true; crop = true; filt = Filter.None; fix = Fix(Enhance.Mode.Document); type = OutType.PDF; quality = 80 }
+            Preset.Archive -> { dpi = 300; multi = false; straight = true; crop = false; filt = Filter.None; fix = Fix(); type = OutType.TIFF }
+            Preset.Fast -> { dpi = 150; multi = false; straight = false; crop = false; filt = Filter.None; fix = Fix(); type = OutType.PDF; quality = 70 }
+        }
+        prefs0.setBool("scanMulti", multi); prefs0.setBool("scanStraight", straight)
+        prefs0.setStr("scanType", type.name); prefs0.setInt("scanQ", quality)
     }
 
     val snack = LocalSnack.current
@@ -504,31 +559,69 @@ fun ScanScreen(m: Modifier, ip: String) {
         }
     }
 
-    suspend fun pdfUri(folder: String? = null, base: String? = null): Uri = withContext(Dispatchers.IO) {
-        val u = if (ocrPdf) {
-            val done = pages.map { p ->
-                val b = proc(p, 2480) ?: throw IOException("image illisible")
-                b to runCatching { Ocr.read(b) }.getOrNull()
-            }
-            Images.savePdf(ctx, folder, base) { o -> Ocr.searchablePdf(done, target, o) }
-                ?.also { OcrIndex.put(ctx, it, done.mapNotNull { d -> d.second?.text }.joinToString("\n")) }
-        } else if (target != null) {
-            val bm = pages.mapNotNull { full(it) }
-            Images.savePdf(ctx, folder, base) { o -> Formats.pdf(bm, target, o) }
-        } else {
-            Images.savePdf(ctx, folder, base) { o -> Images.pdfFromScans(pages, o) { full(it) } }
-        }
-        u ?: throw IOException("enregistrement impossible")
+    /** Documents posés sur la vitre ; [all] : garder aussi un document seul (recadré, redressé). */
+    suspend fun splitPage(p: Page, all: Boolean): List<Page> = withContext(Dispatchers.Default) {
+        val (ow, oh) = bounds(p)
+        val b = Images.decode(p.bytes, 4000)?.let { Images.rotate(it, p.rot) } ?: throw IOException("image illisible")
+        val origW = if (p.rot % 180 == 0) ow else oh
+        val d = (p.dpi * b.width / origW.coerceAtLeast(1)).coerceAtLeast(1)
+        val docs = Images.documents(b)
+        (if (all || docs.size >= 2) docs else emptyList()).map { Page(Images.jpeg(it, 92), d) }
     }
 
-    suspend fun saveJpegs(folder: String? = null, base: String? = null) = withContext(Dispatchers.IO) {
-        pages.forEachIndexed { i, p ->
-            full(p)?.let { b ->
-                val n = base?.let { if (pages.size > 1) "${it}_p${i + 1}" else it }
-                Images.saveJpeg(ctx, Images.jpeg(target?.let { t -> Formats.resize(b, t) } ?: b), folder, n)
+    /** Écrit un groupe de pages dans le type choisi ; renvoie le texte OCR éventuel. */
+    suspend fun writeGroup(g: List<Page>, o: java.io.OutputStream, t: OutType): String {
+        val text = StringBuilder()
+        fun outBmp(p: Page): Bitmap {
+            val src = full(p) ?: throw IOException("image illisible")
+            return target?.let { Formats.resize(src, it) } ?: src
+        }
+        when (t) {
+            OutType.PDF -> {
+                val pdf = PdfOut(o, if (protect) password else null)
+                for (p in g) {
+                    val b = outBmp(p)
+                    val (pw, ph) = if (target == null) 595f to 842f else {
+                        val (w, h) = Formats.fit(b.width, b.height, target)
+                        w * 72f / 2.54f to h * 72f / 2.54f
+                    }
+                    val sc = minOf(pw / b.width, ph / b.height)
+                    val dw = b.width * sc; val dh = b.height * sc; val x = (pw - dw) / 2
+                    val lines: List<PdfOut.Line> = if (!ocrPdf) emptyList() else runCatching { Ocr.read(b) }.getOrNull()?.let { tx ->
+                        text.append(tx.text).append('\n')
+                        tx.textBlocks.flatMap { it.lines }.mapNotNull { ln ->
+                            val r = ln.boundingBox ?: return@mapNotNull null
+                            val h = r.height() * sc
+                            if (h <= 0f || ln.text.isBlank()) null
+                            else PdfOut.Line(ln.text, x + r.left * sc, r.bottom * sc - h * 0.15f, h * 0.85f, r.width() * sc)
+                        }
+                    } ?: emptyList()
+                    pdf.page(pw, ph, Images.jpeg(b, quality), b.width, b.height, x, 0f, dw, dh, lines)
+                }
+                pdf.close()
             }
+            OutType.TIFF -> Tiff.write(o, g.size) { k -> Output.tiffPage(outBmp(g[k]), if (target != null) 300 else effDpi(g[k])) }
+            else -> o.write(Output.encode(outBmp(g[0]), t, quality))
+        }
+        return text.toString()
+    }
+
+    /** Enregistre toutes les pages ; un fichier par page si demandé ou si le type est mono-page. */
+    suspend fun saveAll(folder: String? = null, base: String? = null): List<Uri> = withContext(Dispatchers.IO) {
+        val t = type
+        if (t == OutType.PDF && protect && password.isEmpty()) throw IOException("mot de passe vide")
+        val b0 = base?.takeIf { it.isNotBlank() } ?: Output.name(nameTpl)
+        val groups = if (separate || !t.multi) pages.map { listOf(it) } else listOf(pages)
+        groups.mapIndexed { i, g ->
+            val n = if (groups.size > 1) "${b0}_${i + 1}" else b0
+            var txt = ""
+            val u = Output.save(ctx, t, folder, n) { o -> txt = writeGroup(g, o, t) }
+            if (txt.isNotBlank()) OcrIndex.put(ctx, u, txt)
+            u
         }
     }
+
+    fun savedMsg(n: Int) = "$n fichier(s) ${type.label} enregistré(s) (Documents)."
 
     /** Classement local : OCR de la 1re page sur le téléphone, puis mots-clés. */
     suspend fun analyze(): Classify.Guess {
@@ -544,19 +637,45 @@ fun ScanScreen(m: Modifier, ip: String) {
             Icons.Filled.DocumentScanner, Brand.Scan,
         )
         Section("Numérisation", Icons.Filled.DocumentScanner, accent = Brand.Scan[0]) {
-            ScanOptions(area, { area = it }, dpi, { dpi = it }, color, { color = it })
+            Text("Réglage rapide", style = MaterialTheme.typography.labelLarge)
+            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Preset.entries.forEach { pr ->
+                    FilterChip(selected = preset == pr, onClick = { applyPreset(pr) }, label = { Text(pr.label) })
+                }
+            }
+            ScanOptions(area, { area = it; preset = null }, dpi, { dpi = it; preset = null }, color, { color = it; preset = null })
+            Switcher("Détecter plusieurs documents", multi, "Photos, cartes, tickets espacés d'au moins 5 mm : un fichier chacun, redressé.") {
+                multi = it; prefs0.setBool("scanMulti", it)
+            }
+            Switcher("Ignorer les pages blanches", skipBlank, "Une page vide n'est pas ajoutée.") {
+                skipBlank = it; prefs0.setBool("scanSkipBlank", it)
+            }
         }
         BigButton(
             if (pages.isEmpty()) "Numériser" else "Ajouter une page (${pages.size + 1})",
             Icons.Filled.DocumentScanner, Brand.Scan, busy = busy,
         ) {
-                work("Numérisation en cours…") {
-                    val b = ScanService.keep(ctx) { Escl.scan(ip, dpi, color, area) { progress = it } }
-                    pages = pages + Page(b, dpi)
-                    sel = pages.size - 1
-                    PrinterPrefs(ctx).bump("scans")
-                    "${pages.size} page(s) numérisée(s)."
+            work("Numérisation en cours…") {
+                val b = ScanService.keep(ctx) { Escl.scan(ip, dpi, color, area) { progress = it } }
+                PrinterPrefs(ctx).bump("scans")
+                val pg = Page(b, dpi)
+                if (skipBlank && withContext(Dispatchers.Default) { Images.decode(b, 800)?.let { Images.isBlank(it) } == true }) {
+                    return@work "Page blanche ignorée."
                 }
+                if (multi) {
+                    msg = "Recherche des documents…"
+                    val parts = splitPage(pg, all = true)
+                    if (parts.isNotEmpty()) {
+                        pages = pages + parts
+                        sel = pages.size - parts.size
+                        if (parts.size > 1) separate = true
+                        return@work if (parts.size > 1) "${parts.size} documents détectés : un fichier chacun." else "1 document détecté, recadré et redressé."
+                    }
+                }
+                pages = pages + pg
+                sel = pages.size - 1
+                "${pages.size} page(s) numérisée(s)."
+            }
         }
         if (busy) {
             Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
@@ -615,27 +734,20 @@ fun ScanScreen(m: Modifier, ip: String) {
                         sel = sel.coerceAtMost((pages.size - 1).coerceAtLeast(0))
                     }) { Icon(Icons.Filled.Delete, "Supprimer la page") }
                     androidx.compose.foundation.layout.Spacer(Modifier.weight(1f))
-                    androidx.compose.material3.TextButton(enabled = !busy, onClick = { pages = emptyList(); sel = 0; msg = "" }) { Text("Tout effacer") }
+                    androidx.compose.material3.TextButton(enabled = !busy, onClick = { pages = emptyList(); sel = 0; msg = ""; separate = false }) { Text("Tout effacer") }
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(enabled = !busy, modifier = Modifier.weight(1f), onClick = {
-                        work("Recherche des photos…") {
-                            val p = pages[sel]
-                            val parts = withContext(Dispatchers.Default) {
-                                val o = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                                android.graphics.BitmapFactory.decodeByteArray(p.bytes, 0, p.bytes.size, o)
-                                val b = Images.decode(p.bytes, 4000)?.let { Images.rotate(it, p.rot) } ?: throw IOException("image illisible")
-                                val origW = if (p.rot % 180 == 0) o.outWidth else o.outHeight
-                                val d = (p.dpi * b.width / origW.coerceAtLeast(1)).coerceAtLeast(1)
-                                Images.splitPhotos(b).map { Page(Images.jpeg(it, 92), d) }
-                            }
-                            if (parts.isEmpty()) "Moins de deux photos détectées : espacez-les d'au moins 1 cm."
+                        work("Recherche des documents…") {
+                            val parts = splitPage(pages[sel], all = false)
+                            if (parts.isEmpty()) "Moins de deux documents détectés : espacez-les d'au moins 5 mm."
                             else {
                                 pages = pages.toMutableList().also { l -> l.removeAt(sel); l.addAll(sel, parts) }
-                                "${parts.size} photos séparées."
+                                separate = true
+                                "${parts.size} documents séparés."
                             }
                         }
-                    }) { Text("Séparer les photos") }
+                    }) { Text("Séparer les documents") }
                     OutlinedButton(
                         enabled = !busy && pages.size >= 2 && pages.size % 2 == 0,
                         modifier = Modifier.weight(1f),
@@ -644,7 +756,9 @@ fun ScanScreen(m: Modifier, ip: String) {
                 }
             }
             Section("Retouche", sub = "S'applique à toutes les pages") {
-                Toggle("Redresser et recadrer", crop) { crop = it }
+                Toggle("Redresser automatiquement", straight) { straight = it; prefs0.setBool("scanStraight", it) }
+                Toggle("Recadrer les marges", crop) { crop = it }
+                FixPicker(fix) { fix = it }
                 Text("Filtre", style = MaterialTheme.typography.labelLarge)
                 FilterChips(filt) { filt = it }
                 if (filt == Filter.Doc || filt == Filter.BW) Hint("Fond blanchi, ombres et papier jauni supprimés : économise l'encre.")
@@ -655,16 +769,42 @@ fun ScanScreen(m: Modifier, ip: String) {
                 FormatPicker(out, { out = it }, detected)
             }
             Section("Enregistrer et partager") {
-                Toggle("PDF avec texte cherchable (OCR)", ocrPdf) { ocrPdf = it }
+                OptChips("Type de fichier", OutType.entries, type, { it.label }) { type = it; prefs0.setStr("scanType", it.name) }
+                Hint(type.sub)
+                if (type.lossy) {
+                    Text("Qualité $quality %", style = MaterialTheme.typography.labelLarge)
+                    Slider(
+                        value = quality.toFloat(), valueRange = 40f..100f, steps = 11,
+                        onValueChange = { quality = it.toInt() }, onValueChangeFinished = { prefs0.setInt("scanQ", quality) },
+                    )
+                }
+                if (type == OutType.PDF) {
+                    Toggle("Texte cherchable (OCR)", ocrPdf) { ocrPdf = it }
+                    Toggle("Protéger par mot de passe", protect) { protect = it }
+                    if (protect) androidx.compose.material3.OutlinedTextField(
+                        password, { password = it }, singleLine = true, modifier = Modifier.fillMaxWidth(),
+                        label = { Text("Mot de passe d'ouverture") },
+                        visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                    )
+                }
+                if (type.multi && pages.size > 1) Toggle("Un fichier par page", separate) { separate = it }
+                androidx.compose.material3.OutlinedTextField(
+                    nameTpl, { nameTpl = it; prefs0.setStr("scanName", it) }, singleLine = true, modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Nom du fichier") }, supportingText = { Text("Variables : {date} {heure}") },
+                )
+                Text(
+                    "Poids estimé : ${estimate ?: "calcul…"}",
+                    style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.primary,
+                )
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(enabled = !busy, modifier = Modifier.weight(1f), onClick = {
-                        if (prefs0.autoClass) work("Analyse du document…") { plan = SavePlan(true, analyze()); "" }
-                        else work(if (ocrPdf) "Création du PDF (OCR)…" else "Création du PDF…") { pdfUri(); "PDF enregistré (Documents)." }
-                    }) { Text("PDF") }
-                    Button(enabled = !busy, modifier = Modifier.weight(1f), onClick = {
-                        if (prefs0.autoClass) work("Analyse du document…") { plan = SavePlan(false, analyze()); "" }
-                        else work("Enregistrement…") { saveJpegs(); "JPEG enregistré(s) (Documents)." }
-                    }) { Text("JPEG") }
+                        if (prefs0.autoClass) work("Analyse du document…") { plan = SavePlan(analyze()); "" }
+                        else work(if (ocrPdf && type == OutType.PDF) "Création du PDF (OCR)…" else "Enregistrement…") { savedMsg(saveAll().size) }
+                    }) { Text("Enregistrer") }
+                    OutlinedButton(enabled = !busy, modifier = Modifier.weight(1f), onClick = {
+                        work("Préparation…") { Output.shareAll(ctx, saveAll(), type.mime); "" }
+                    }) { Text("Partager") }
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(enabled = !busy, modifier = Modifier.weight(1f), onClick = {
@@ -683,31 +823,19 @@ fun ScanScreen(m: Modifier, ip: String) {
                         }
                     }) { Text("Imprimer") }
                     OutlinedButton(enabled = !busy, modifier = Modifier.weight(1f), onClick = {
-                        work("Préparation…") {
-                            if (pages.size == 1) {
-                                val u = withContext(Dispatchers.IO) { full(pages[0])?.let { b -> Images.saveJpeg(ctx, Images.jpeg(target?.let { t -> Formats.resize(b, t) } ?: b)) } }
-                                    ?: throw IOException("enregistrement impossible")
-                                share(ctx, u, "image/jpeg")
-                            } else {
-                                share(ctx, pdfUri(), "application/pdf")
-                            }
-                            ""
+                        work("Lecture du texte…") {
+                            val txt = withContext(Dispatchers.Default) {
+                                pages.mapNotNull { p -> proc(p, 2480) }
+                            }.map { Ocr.read(it).text }.joinToString("\n\n")
+                            ocrText = txt
+                            if (txt.isBlank()) "Aucun texte détecté." else ""
                         }
-                    }) { Text("Partager") }
+                    }) { Text("Extraire le texte") }
                 }
-                OutlinedButton(enabled = !busy, modifier = Modifier.fillMaxWidth(), onClick = {
-                    work("Lecture du texte…") {
-                        val txt = withContext(Dispatchers.Default) {
-                            pages.mapNotNull { p -> proc(p, 2480) }
-                        }.map { Ocr.read(it).text }.joinToString("\n\n")
-                        ocrText = txt
-                        if (txt.isBlank()) "Aucun texte détecté." else ""
-                    }
-                }) { Text("Extraire le texte (OCR)") }
             }
         }
         plan?.let { pl ->
-            var type by remember(pl) { mutableStateOf(pl.guess.type) }
+            var dt by remember(pl) { mutableStateOf(pl.guess.type) }
             var name by remember(pl) { mutableStateOf(pl.guess.name()) }
             androidx.compose.material3.AlertDialog(
                 onDismissRequest = { plan = null },
@@ -717,33 +845,30 @@ fun ScanScreen(m: Modifier, ip: String) {
                         Hint("Type détecté sur le téléphone (aucun envoi en ligne). Modifiable.")
                         Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                             DocType.entries.forEach { d ->
-                                FilterChip(selected = type == d, onClick = { type = d; name = pl.guess.name(d) }, label = { Text(d.label) })
+                                FilterChip(selected = dt == d, onClick = { dt = d; name = pl.guess.name(d) }, label = { Text(d.label) })
                             }
                         }
                         androidx.compose.material3.OutlinedTextField(
                             name, { name = it }, singleLine = true, modifier = Modifier.fillMaxWidth(),
                             label = { Text("Nom du fichier") },
                         )
-                        Hint("Dossier : ${if (pl.pdf) "Téléchargements" else "Images"}/Canon/${type.folder}")
+                        Hint("Dossier : ${if (type == OutType.PDF || type == OutType.TIFF) "Téléchargements" else "Images"}/Canon/${dt.folder}")
                     }
                 },
                 confirmButton = {
                     androidx.compose.material3.TextButton(onClick = {
-                        val f = type.folder; val n = Classify.clean(name)
+                        val f = dt.folder; val n = Classify.clean(name); val lbl = dt.label
                         plan = null
                         work("Enregistrement…") {
-                            if (pl.pdf) pdfUri(f, n) else saveJpegs(f, n)
-                            "Classé dans ${type.label} : $n"
+                            saveAll(f, n)
+                            "Classé dans $lbl : $n"
                         }
                     }) { Text("Enregistrer") }
                 },
                 dismissButton = {
                     androidx.compose.material3.TextButton(onClick = {
                         plan = null
-                        work("Enregistrement…") {
-                            if (pl.pdf) pdfUri() else saveJpegs()
-                            "Enregistré sans classement."
-                        }
+                        work("Enregistrement…") { savedMsg(saveAll().size) }
                     }) { Text("Sans classer") }
                 },
             )
@@ -789,8 +914,20 @@ fun ScanScreen(m: Modifier, ip: String) {
     }
 }
 
+/** Choix des corrections automatiques (scan et copie). */
+@Composable
+fun FixPicker(fix: Fix, onChange: (Fix) -> Unit) {
+    OptChips("Correction auto", Enhance.Mode.entries, fix.mode, { it.label }) { m ->
+        val old = m == Enhance.Mode.Faded || m == Enhance.Mode.OldBw
+        onChange(fix.copy(mode = m, dust = fix.dust || old))
+    }
+    if (fix.mode.hint.isNotEmpty()) Hint(fix.mode.hint)
+    Toggle("Dépoussiérer (taches, poussières)", fix.dust) { onChange(fix.copy(dust = it)) }
+    Toggle("Accentuer la netteté", fix.sharp) { onChange(fix.copy(sharp = it)) }
+}
+
 /** Enregistrement en attente de validation du classement. */
-class SavePlan(val pdf: Boolean, val guess: Classify.Guess)
+class SavePlan(val guess: Classify.Guess)
 
 /** Rectos (1re moitié) et versos (2e moitié) remis dans l'ordre r1, v1, r2, v2… */
 fun interleave(l: List<Page>, reverse: Boolean): List<Page> {

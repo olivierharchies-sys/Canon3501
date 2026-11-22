@@ -149,6 +149,14 @@ class PrinterPrefs(ctx: Context) {
         countersSince = System.currentTimeMillis()
     }
 
+    /** Réglages simples mémorisés (numérisation, copie). */
+    fun bool(k: String, d: Boolean) = sp.getBoolean(k, d)
+    fun setBool(k: String, v: Boolean) = sp.edit().putBoolean(k, v).apply()
+    fun int(k: String, d: Int) = sp.getInt(k, d)
+    fun setInt(k: String, v: Int) = sp.edit().putInt(k, v).apply()
+    fun str(k: String, d: String) = sp.getString(k, d) ?: d
+    fun setStr(k: String, v: String) = sp.edit().putString(k, v).apply()
+
     var askedNotif: Boolean
         get() = sp.getBoolean("askedNotif", false)
         set(v) = sp.edit().putBoolean("askedNotif", v).apply()
