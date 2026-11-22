@@ -88,29 +88,38 @@ object CopyLayout {
                 }
                 sink(out)
             }
-            else -> pack(docs, filt, fix, sink)
+            else -> pack(docs, filt, fix, keep, sink)
         }
     }
 
     /** Rangement par étagères à taille réelle : tickets, cartes, petits documents sur le moins de feuilles possible. */
-    private fun pack(docs: List<CopyItem>, filt: Filter, fix: Fix, sink: (Bitmap) -> Unit) {
+    private fun pack(docs: List<CopyItem>, filt: Filter, fix: Fix, keep: Boolean, sink: (Bitmap) -> Unit) {
         val m = 5 * MM; val gap = 4 * MM
         val uw = W - 2 * m; val uh = H - 2 * m
+        // Taille d'origine : document presque A4, seul sur sa feuille, centré, sans réduction.
+        val big = ArrayList<Bitmap>()
         // Recadrage et mise à 300 dpi.
         val parts = docs.mapNotNull { d ->
-            load(d)?.let { (b, dpi) ->
+            load(d)?.let { (b, dpi) -> run {
                 var x = Images.autoCrop(Images.deskew(b))
                 val k = 300f / dpi
                 if (k != 1f) x = Bitmap.createScaledBitmap(x, (x.width * k).toInt().coerceAtLeast(1), (x.height * k).toInt().coerceAtLeast(1), true)
                 // Couché si cela tient mieux en largeur.
                 if (x.width > uw && x.height <= uw) x = Images.rotate(x, 90)
                 if (x.width > uw || x.height > uh) {
+                    if (keep && x.width <= W * 1.03f && x.height <= H * 1.03f) {
+                        val o = blank()
+                        Canvas(o).drawBitmap(x, (W - x.width) / 2f, (H - x.height) / 2f, Paint(Paint.FILTER_BITMAP_FLAG))
+                        big += prep(o, filt, fix)
+                        return@run null
+                    }
                     val s = minOf(uw / x.width, uh / x.height)
                     x = Bitmap.createScaledBitmap(x, (x.width * s).toInt(), (x.height * s).toInt(), true)
                 }
                 prep(x, filt, fix)
-            }
+            } }
         }.sortedByDescending { it.height }
+        big.forEach(sink)
 
         var out: Bitmap? = null; var c: Canvas? = null
         var x = m; var y = m; var shelf = 0f

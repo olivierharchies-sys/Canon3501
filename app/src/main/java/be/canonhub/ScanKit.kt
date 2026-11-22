@@ -89,6 +89,24 @@ object Detect {
         for (i in m.indices) if (!out[i]) m[i] = true
     }
 
+    /**
+     * Efface le cadre de la vitre (trait, ombre du capot) près des bords : sinon il ferme
+     * le contour et toute la vitre devient un seul objet (aucun document détecté).
+     */
+    private fun clearBorders(m: BooleanArray, ink: BooleanArray, w: Int, h: Int) {
+        val bw = maxOf(4, w / 30); val bh = maxOf(4, h / 30)
+        for (k in 0 until bh) for (y in intArrayOf(k, h - 1 - k)) {
+            var n = 0
+            for (x in 0 until w) if (m[y * w + x]) n++
+            if (n > w * 0.75f) for (x in 0 until w) { m[y * w + x] = false; ink[y * w + x] = false }
+        }
+        for (k in 0 until bw) for (x in intArrayOf(k, w - 1 - k)) {
+            var n = 0
+            for (y in 0 until h) if (m[y * w + x]) n++
+            if (n > h * 0.75f) for (y in 0 until h) { m[y * w + x] = false; ink[y * w + x] = false }
+        }
+    }
+
     private class Comp(var l: Int, var t: Int, var r: Int, var b: Int, val rows: HashMap<Int, IntArray>, var n: Int, var ink: Int = 0)
 
     /** Enveloppe convexe (chaîne monotone). */
@@ -144,7 +162,9 @@ object Detect {
     fun findDocs(px: IntArray, w: Int, h: Int, gap: Int = maxOf(3, w / 80)): List<RotRect> {
         val r = 2
         val ink = BooleanArray(px.size)
-        val m = dilate(mask(px, w, h, ink), w, h, r)
+        val raw = mask(px, w, h, ink)
+        clearBorders(raw, ink, w, h)
+        val m = dilate(raw, w, h, r)
         fillHoles(m, w, h)
         // Composantes connexes.
         val seen = BooleanArray(m.size)

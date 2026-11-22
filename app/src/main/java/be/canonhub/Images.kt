@@ -79,7 +79,9 @@ object Images {
             return (AColor.red(c) + AColor.green(c) + AColor.blue(c)) / 3 < 215
         }
         var l = sw; var r = -1; var t = sh; var b = -1
-        for (y in 0 until sh) for (x in 0 until sw) if (dark(x, y)) {
+        // Bande du bord ignorée : cadre/ombre de la vitre, qui empêchait tout recadrage.
+        val e = 5
+        for (y in e until sh - e) for (x in e until sw - e) if (dark(x, y)) {
             if (x < l) l = x; if (x > r) r = x
             if (y < t) t = y; if (y > b) b = y
         }

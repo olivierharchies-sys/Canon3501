@@ -303,18 +303,22 @@ fun CopyScreen(m: Modifier, prefs: PrinterPrefs, ip: String) {
     }) {
         Hero(
             "Copier",
-            "${areaLabel(area)} · ${if (color) "Couleur" else "N&B"} · ${route.label}",
+            "${if (auto) "Détection auto" else areaLabel(area)} · ${if (color) "Couleur" else "N&B"} · ${route.label}",
             Icons.Filled.ContentCopy, Brand.Copy,
         )
 
         Section("Que copiez-vous ?", Icons.Filled.Layers, accent = Brand.Copy[1]) {
             Switcher("Détection automatique", auto, "Prénumérisation rapide : taille et nombre de documents détectés, une image par document.") {
                 auto = it; prefs.setBool("copyAuto", it)
+                if (it) { area = Area.A4; front = null }
             }
-            ChoiceGrid(Area.entries, area, 2, ::areaLabel, ::areaSub, ::areaIcon, accent = Brand.Copy[1]) { area = it; front = null }
-            if (auto && area != Area.Card) Hint("Format choisi automatiquement (sauf carte recto/verso).")
-            if (area == Area.Card) CardSteps(front != null)
-            else if (area != Area.A4) Hint("Placez le document contre le coin repère de la vitre.")
+            // Détection automatique : format et nombre de documents imposés par la prénumérisation.
+            if (auto) Hint("Format et nombre de documents détectés. Carte recto/verso : désactivez la détection.")
+            else {
+                ChoiceGrid(Area.entries, area, 2, ::areaLabel, ::areaSub, ::areaIcon, accent = Brand.Copy[1]) { area = it; front = null }
+                if (area == Area.Card) CardSteps(front != null)
+                else if (area != Area.A4) Hint("Placez le document contre le coin repère de la vitre.")
+            }
         }
 
         Section("Réglages", Icons.Filled.Tune, accent = Brand.Copy[1]) {
