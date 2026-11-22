@@ -30,7 +30,8 @@ object CopyLayout {
         val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(it.page.bytes, 0, it.page.bytes.size, o)
         val b = Images.decode(it.page.bytes, 3508) ?: return null
-        return b to it.page.dpi * b.width.toFloat() / o.outWidth.coerceAtLeast(1)
+        val dpi = it.page.dpi * b.width.toFloat() / o.outWidth.coerceAtLeast(1)
+        return Images.cropArea(Images.rotate(b, it.page.rot), it.page.crop) to dpi
     }
 
     private fun prep(b: Bitmap, filt: Filter, fix: Fix = Fix()): Bitmap = Calib.forCopy(Images.applyFilter(Images.fix(b, fix), filt))
@@ -54,9 +55,18 @@ object CopyLayout {
         if (docs.isEmpty()) return
         when {
             target != null -> docs.forEach { d ->
-                load(d)?.let { (b, _) -> sink(prep(Formats.onA4(Images.autoCrop(Images.deskew(b)), target), filt, fix)) }
+                load(d)?.let { (b, _) ->
+                    val x = if (d.page.crop != null) st(b) else Images.autoCrop(Images.deskew(b))
+                    sink(prep(Formats.onA4(x, target), filt, fix))
+                }
             }
-            layout == PageLayout.One -> docs.forEach { d -> load(d)?.let { (b, _) -> sink(prep(st(b), filt, fix)) } }
+            layout == PageLayout.One -> docs.forEach { d ->
+                load(d)?.let { (b, dpi) ->
+                    val x = st(b)
+                    // Zone choisie : posée à taille réelle sur une feuille A4.
+                    sink(prep(if (d.page.crop != null) Formats.onA4(x, x.width / dpi * 2.54f to x.height / dpi * 2.54f) else x, filt, fix))
+                }
+            }
             layout == PageLayout.Two -> docs.chunked(2).forEach { pair ->
                 val out = blank(); val c = Canvas(out)
                 val m = 5 * MM

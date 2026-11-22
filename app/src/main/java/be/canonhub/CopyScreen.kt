@@ -11,6 +11,8 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
@@ -122,6 +124,8 @@ fun CopyScreen(m: Modifier, prefs: PrinterPrefs, ip: String) {
     var layout by remember { mutableStateOf(prefs.copyLayout) }
     var straight by remember { mutableStateOf(prefs.bool("copyStraight", false)) }
     var corr by remember { mutableStateOf(Fix()) }
+    var preview by remember { mutableStateOf(prefs.bool("copyPreview", false)) }
+    var cropIdx by remember { mutableStateOf<Int?>(null) }
     var queue by remember { mutableStateOf<List<CopyItem>>(emptyList()) }
     var sel by remember { mutableIntStateOf(0) }
     val drv = rememberDriver(prefs, route == Route.Driver)
@@ -187,11 +191,17 @@ fun CopyScreen(m: Modifier, prefs: PrinterPrefs, ip: String) {
         return "$docs document(s) sur $n feuilles. $r"
     }
 
-    suspend fun add(item: CopyItem): String =
-        if (batch) {
+    suspend fun add(item: CopyItem): String = when {
+        batch -> {
             queue = queue + item; sel = queue.size - 1
             "Ajouté au lot (${queue.size}). Posez le document suivant."
-        } else printAll(listOf(item))
+        }
+        preview -> {
+            queue = listOf(item); sel = 0
+            "Aperçu prêt : choisissez la zone si besoin, puis « Imprimer »."
+        }
+        else -> printAll(listOf(item))
+    }
 
     fun scanNow() {
         scope.launch {
@@ -222,8 +232,8 @@ fun CopyScreen(m: Modifier, prefs: PrinterPrefs, ip: String) {
 
     ActionScreen(m, bottom = {
         StatusMsg(msg, busy)
-        if (batch && queue.isNotEmpty()) {
-            BigButton("Imprimer le lot (${queue.size})", Icons.Filled.Print, Brand.Print, busy = busy) {
+        if ((batch || preview) && queue.isNotEmpty()) {
+            BigButton(if (batch) "Imprimer le lot (${queue.size})" else "Imprimer", Icons.Filled.Print, Brand.Print, busy = busy) {
                 scope.launch {
                     busy = true; msg = "Mise en page…"
                     msg = try {
@@ -274,8 +284,27 @@ fun CopyScreen(m: Modifier, prefs: PrinterPrefs, ip: String) {
         Section("Mode", Icons.Filled.Inventory2, accent = Brand.Copy[1]) {
             Segmented(listOf(false, true), batch, { if (it) "Par lot" else "Immédiate" }) { batch = it; prefs.copyBatch = it }
             Hint(if (batch) "Numérisez plusieurs documents, puis imprimez l'ensemble." else "Chaque document est imprimé juste après le scan.")
-            if (batch && queue.isNotEmpty()) {
-                PageStrip(queue.map { it.page }, sel.coerceIn(0, queue.size - 1)) { sel = it }
+            Switcher("Aperçu avant impression", preview, "Voir le scan, choisir une zone et sa taille, puis imprimer.") {
+                preview = it; prefs.setBool("copyPreview", it)
+            }
+            if ((batch || preview) && queue.isNotEmpty()) {
+                val item = queue[sel.coerceIn(0, queue.size - 1)]
+                val img by androidx.compose.runtime.produceState<Bitmap?>(null, item) {
+                    value = withContext(Dispatchers.Default) {
+                        Images.decode(item.page.bytes, 1000)?.let { Images.cropArea(Images.rotate(it, item.page.rot), item.page.crop) }
+                    }
+                }
+                img?.let {
+                    androidx.compose.foundation.Image(
+                        it.asImageBitmap(), "Aperçu",
+                        Modifier.fillMaxWidth().heightIn(max = 360.dp),
+                        contentScale = androidx.compose.ui.layout.ContentScale.Fit,
+                    )
+                }
+                if (!item.sheet) OutlinedButton(enabled = !busy, modifier = Modifier.fillMaxWidth(), onClick = { cropIdx = sel.coerceIn(0, queue.size - 1) }) {
+                    Text(if (item.page.crop != null) "Modifier la zone et la taille" else "Choisir une zone et sa taille")
+                }
+                if (batch) PageStrip(queue.map { it.page }, sel.coerceIn(0, queue.size - 1)) { sel = it }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(enabled = !busy, modifier = Modifier.weight(1f), onClick = {
                         queue = queue.toMutableList().also { it.removeAt(sel.coerceIn(0, queue.size - 1)) }
@@ -306,6 +335,21 @@ fun CopyScreen(m: Modifier, prefs: PrinterPrefs, ip: String) {
             FixPicker(corr) { corr = it }
             FilterChips(filt) { filt = it }
             if (filt == Filter.Doc || filt == Filter.BW) Hint("Fond blanchi : économise l'encre.")
+        }
+
+        cropIdx?.let { ci ->
+            queue.getOrNull(ci)?.let { it2 ->
+                val p = it2.page
+                val o = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                android.graphics.BitmapFactory.decodeByteArray(p.bytes, 0, p.bytes.size, o)
+                val cm = 2.54f / p.dpi
+                CropDialog(
+                    p.crop, o.outWidth * cm to o.outHeight * cm, out, { out = it },
+                    load = { Images.decode(p.bytes, 1400)?.let { Images.rotate(it, p.rot) } },
+                    onDone = { c -> queue = queue.toMutableList().also { l -> l[ci] = CopyItem(p.withCrop(c), it2.sheet) }; cropIdx = null },
+                    onCancel = { cropIdx = null },
+                )
+            }
         }
 
         Fold("Numérisation et envoi", Icons.Filled.Print, sub = "$dpi dpi · ${route.label}", accent = Brand.Copy[1]) {

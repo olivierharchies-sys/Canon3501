@@ -67,6 +67,9 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.FilterChip
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -296,31 +299,35 @@ fun PrintScreen(m: Modifier, prefs: PrinterPrefs, ip: String, shared: Uri?, clea
     var duplex by remember { mutableStateOf(false) }
     var versoRev by remember { mutableStateOf(false) }
     var verso by remember { mutableStateOf<File?>(null) }
+    var versoOpts by remember { mutableStateOf<PrintOpts?>(null) }
     var busy by remember { mutableStateOf(false) }
     var msg by remember { mutableStateOf("") }
     val drv = rememberDriver(prefs, route == Route.Driver)
+    var extras by remember { mutableStateOf(Extras()) }
+    var outF by remember { mutableStateOf(OutFmt()) }
+    var cropOpen by remember { mutableStateOf(false) }
 
     /** Pilote intégré : brouillon, N&B ou plusieurs pages par feuille passent d'abord par un PDF préparé. */
-    suspend fun driverPrint(uri: Uri, mime: String, oneCopy: Boolean): String {
+    suspend fun driverPrint(uri: Uri, mime: String, oneCopy: Boolean, o: PrintOpts = opts, rg0: String = range): String {
         if (ip.isBlank()) throw IOException("adresse IP manquante")
-        val prep = opts.quality == Quality.Draft || opts.nUp > 1 || !opts.color
-        val r = if (oneCopy) "" else range
+        val prep = o.quality == Quality.Draft || o.nUp > 1 || !o.color
+        val r = if (oneCopy) "" else rg0
         val (u, mm, rest) = if (prep) {
-            val f = withContext(Dispatchers.IO) { PrintPrep.prepare(ctx, uri, mime, opts, r) }.first
+            val f = withContext(Dispatchers.IO) { PrintPrep.prepare(ctx, uri, mime, o, r) }.first
             Triple(Uri.fromFile(f), "application/pdf", "")
         } else Triple(uri, mime, r)
-        val dpi = when (opts.quality) { Quality.Draft -> 150; Quality.Standard -> 200; Quality.High -> 300 }
-        val job = if (oneCopy) Gutenprint.Job(orient = opts.orient)
-            else Gutenprint.Job(copies, collate, rest, opts.orient, reverse)
-        val res = Gutenprint.print(ctx, ip, u, mm, drv.selFor(opts.color), opts.borderless, opts.fill, dpi, job = job) { msg = it }
+        val dpi = when (o.quality) { Quality.Draft -> 150; Quality.Standard -> 200; Quality.High -> 300 }
+        val job = if (oneCopy) Gutenprint.Job(orient = o.orient)
+            else Gutenprint.Job(copies, collate, rest, o.orient, reverse)
+        val res = Gutenprint.print(ctx, ip, u, mm, drv.selFor(o.color), o.borderless, o.fill, dpi, job = job) { msg = it }
         markPrint(ctx)
         return res
     }
 
     /** Ouvre le fichier (préparé : format, brouillon, pages par feuille) dans l'appli Canon PRINT. */
-    suspend fun toCanonPrint(uri: Uri, mime: String): String {
-        val (u, mm) = if (PrintPrep.needsPrep(mime, opts) || range.isNotBlank()) {
-            val f = withContext(Dispatchers.IO) { PrintPrep.prepare(ctx, uri, mime, opts, range) }.first
+    suspend fun toCanonPrint(uri: Uri, mime: String, o: PrintOpts = opts, rg0: String = range): String {
+        val (u, mm) = if (PrintPrep.needsPrep(mime, o) || rg0.isNotBlank()) {
+            val f = withContext(Dispatchers.IO) { PrintPrep.prepare(ctx, uri, mime, o, rg0) }.first
             androidx.core.content.FileProvider.getUriForFile(ctx, "be.canonhub.files", f) to "application/pdf"
         } else uri to mime
         val i = Intent(Intent.ACTION_SEND).setType(mm).putExtra(Intent.EXTRA_STREAM, u)
@@ -334,32 +341,44 @@ fun PrintScreen(m: Modifier, prefs: PrinterPrefs, ip: String, shared: Uri?, clea
         }
     }
 
-    suspend fun output(uri: Uri, mime: String, oneCopy: Boolean = false): String = when (route) {
-        Route.Driver -> try { driverPrint(uri, mime, oneCopy) } catch (e: Exception) {
-            "Pilote intégré : échec (${e.message}). " + androidPrintOpts(ctx, uri, mime, opts)
+    suspend fun output(uri: Uri, mime: String, oneCopy: Boolean = false, o: PrintOpts = opts, rg0: String = range): String = when (route) {
+        Route.Driver -> try { driverPrint(uri, mime, oneCopy, o, rg0) } catch (e: Exception) {
+            "Pilote intégré : échec (${e.message}). " + androidPrintOpts(ctx, uri, mime, o)
         }
-        Route.Ipp -> try { directPrint(ctx, ip, uri, mime, if (oneCopy) 1 else copies, opts.color) } catch (e: Exception) {
-            "Impression directe refusée (${e.message}). " + androidPrintOpts(ctx, uri, mime, opts)
+        Route.Ipp -> try { directPrint(ctx, ip, uri, mime, if (oneCopy) 1 else copies, o.color) } catch (e: Exception) {
+            "Impression directe refusée (${e.message}). " + androidPrintOpts(ctx, uri, mime, o)
         }
-        Route.CanonApp -> toCanonPrint(uri, mime)
-        Route.Android -> androidPrintOpts(ctx, uri, mime, opts)
+        Route.CanonApp -> toCanonPrint(uri, mime, o, rg0)
+        Route.Android -> androidPrintOpts(ctx, uri, mime, o)
     }
 
-    fun go(uri: Uri) {
-        val mime = ctx.contentResolver.getType(uri) ?: info?.mime ?: "application/octet-stream"
+    fun go(uri0: Uri) {
+        val mime0 = ctx.contentResolver.getType(uri0) ?: info?.mime ?: "application/octet-stream"
         scope.launch {
             busy = true; msg = "Préparation…"
             msg = try {
+                // Mise en page et ajouts : PDF préparé d'abord, puis imprimé tel quel.
+                val x = extras.copy(size = if (extras.mode == Imposition.Normal && opts.nUp == 1) outF.target() else null)
+                var uri = uri0; var mime = mime0; var o = opts; var rg = range
+                if (x.active()) {
+                    msg = "Mise en page…"
+                    val (f, land) = withContext(Dispatchers.IO) { PrintPrep.prepare(ctx, uri0, mime0, opts, range, x) }
+                    uri = Uri.fromFile(f); mime = "application/pdf"; rg = ""
+                    o = opts.copy(
+                        nUp = 1, fill = false, orient = if (land) Orient.Landscape else Orient.Portrait,
+                        quality = if (opts.quality == Quality.Draft) Quality.Standard else opts.quality,
+                    )
+                }
                 if (duplex && mime == "application/pdf" && route != Route.CanonApp) {
                     val (r, v) = withContext(Dispatchers.IO) {
                         Images.splitPdf(ctx, uri, true, false) to Images.splitPdf(ctx, uri, false, versoRev)
                     }
                     if (r == null) throw IOException("PDF illisible")
-                    val s = output(Uri.fromFile(r), "application/pdf", oneCopy = true)
-                    verso = v
+                    val s = output(Uri.fromFile(r), "application/pdf", oneCopy = true, o = o, rg0 = "")
+                    verso = v; versoOpts = o
                     if (v == null) "$s Une seule page : pas de verso."
                     else "$s Recto imprimé ? Retournez la pile, remettez-la dans le bac, puis « Imprimer le verso »."
-                } else output(uri, mime)
+                } else output(uri, mime, o = o, rg0 = rg)
             } catch (e: Exception) { "Échec : ${e.message}" }
             busy = false
         }
@@ -399,7 +418,7 @@ fun PrintScreen(m: Modifier, prefs: PrinterPrefs, ip: String, shared: Uri?, clea
             BigButton("Imprimer le verso", Icons.Filled.FlipToBack, Brand.Copy, busy = busy) {
                 scope.launch {
                     busy = true
-                    msg = try { output(Uri.fromFile(v), "application/pdf", oneCopy = true) } catch (e: Exception) { "Échec : ${e.message}" }
+                    msg = try { output(Uri.fromFile(v), "application/pdf", oneCopy = true, o = versoOpts ?: opts, rg0 = "") } catch (e: Exception) { "Échec : ${e.message}" }
                     verso = null; busy = false
                 }
             }
@@ -461,10 +480,68 @@ fun PrintScreen(m: Modifier, prefs: PrinterPrefs, ip: String, shared: Uri?, clea
                     Segmented(Orient.entries, opts.orient, { it.label }, ::orientIcon) { setOpts(opts.copy(orient = it)) }
                 }
             }
-            Label("Pages par feuille")
-            Segmented(listOf(1, 2, 4), opts.nUp, { "$it par feuille" }) { setOpts(opts.copy(nUp = it)) }
+            Label("Type de mise en page")
+            Chips(Imposition.entries, extras.mode, { it.label }) {
+                extras = extras.copy(mode = it)
+                if (it == Imposition.Booklet) duplex = true
+            }
+            Hint(extras.mode.sub)
+            when (extras.mode) {
+                Imposition.Normal -> {
+                    Label("Pages par feuille")
+                    Chips(listOf(1, 2, 4, 6, 9), opts.nUp, { "$it" }) { setOpts(opts.copy(nUp = it)) }
+                }
+                Imposition.Poster -> {
+                    Label("Taille de l'affiche")
+                    Chips(listOf(2, 3, 4), extras.poster, { "$it×$it feuilles" }) { extras = extras.copy(poster = it) }
+                }
+                else -> {}
+            }
+            OutlinedButton(enabled = file != null, modifier = Modifier.fillMaxWidth(), onClick = { cropOpen = true }) {
+                Text(
+                    if (extras.crop != null || outF.fmt != Fmt.Original) "Zone et taille : modifiées" else "Choisir une zone et la taille de sortie",
+                )
+            }
+            if (extras.crop != null || outF.fmt != Fmt.Original) {
+                Hint("Zone appliquée à toutes les pages. Taille de sortie : 1 page par feuille, mise en page normale.")
+                TextButton(onClick = { extras = extras.copy(crop = null); outF = OutFmt() }) { Text("Réinitialiser zone et taille") }
+            }
             Switcher("Sans bordure", opts.borderless, "Photo jusqu'au bord", Icons.Filled.CropFree) { setOpts(opts.copy(borderless = it)) }
             Switcher("Remplir la page", opts.fill, "Photo recadrée pour couvrir la case", Icons.Filled.Crop) { setOpts(opts.copy(fill = it)) }
+        }
+
+        if (route != Route.Ipp) Fold(
+            "Ajouts sur les pages", Icons.Filled.Edit,
+            sub = listOfNotNull(
+                extras.watermark.takeIf { it.isNotBlank() }?.let { "Filigrane" }, if (extras.numbers) "Numéros" else null,
+                if (extras.header.isNotBlank() || extras.date) "En-tête" else null, if (extras.mirror) "Miroir" else null,
+            ).joinToString(" · ").ifEmpty { "Filigrane, numéros, en-tête, miroir" },
+        ) {
+            OutlinedTextField(
+                extras.watermark, { extras = extras.copy(watermark = it) }, Modifier.fillMaxWidth(), singleLine = true,
+                label = { Text("Filigrane (vide = aucun)") }, placeholder = { Text("ex. COPIE, CONFIDENTIEL") },
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                listOf("COPIE", "CONFIDENTIEL", "BROUILLON").forEach { w ->
+                    FilterChip(selected = extras.watermark == w, onClick = { extras = extras.copy(watermark = if (extras.watermark == w) "" else w) }, label = { Text(w) })
+                }
+            }
+            OutlinedTextField(
+                extras.header, { extras = extras.copy(header = it) }, Modifier.fillMaxWidth(), singleLine = true,
+                label = { Text("En-tête (vide = aucun)") },
+            )
+            Switcher("Date en haut à droite", extras.date) { extras = extras.copy(date = it) }
+            Switcher("Numéros de feuille", extras.numbers, "En bas : 1 / 4") { extras = extras.copy(numbers = it) }
+            Switcher("Impression miroir", extras.mirror, "Transfert sur T-shirt : image inversée") { extras = extras.copy(mirror = it) }
+        }
+
+        if (cropOpen) file?.let { f ->
+            CropDialog(
+                extras.crop, info?.let { inf -> if (inf.mime == "application/pdf") pdfCm(ctx, f) else null }, outF, { outF = it },
+                load = { firstPage(ctx, f) },
+                onDone = { c -> extras = extras.copy(crop = c); cropOpen = false },
+                onCancel = { cropOpen = false },
+            )
         }
 
         Section("Qualité et couleur", Icons.Filled.Palette) {
@@ -514,3 +591,31 @@ fun PrintScreen(m: Modifier, prefs: PrinterPrefs, ip: String, shared: Uri?, clea
         }
     }
 }
+
+/** Taille (cm) de la 1re page d'un PDF. */
+fun pdfCm(ctx: Context, uri: Uri): Pair<Float, Float>? = runCatching {
+    ctx.contentResolver.openFileDescriptor(uri, "r")!!.use { fd ->
+        android.graphics.pdf.PdfRenderer(fd).use { r -> r.openPage(0).use { p -> p.width * 2.54f / 72f to p.height * 2.54f / 72f } }
+    }
+}.getOrNull()
+
+/** Première page (PDF rendu ou image décodée), pour choisir une zone. */
+fun firstPage(ctx: Context, uri: Uri): Bitmap? = runCatching {
+    val mime = ctx.contentResolver.getType(uri) ?: ""
+    if (mime == "application/pdf") {
+        ctx.contentResolver.openFileDescriptor(uri, "r")!!.use { fd ->
+            android.graphics.pdf.PdfRenderer(fd).use { r ->
+                r.openPage(0).use { p ->
+                    val k = 1400f / maxOf(p.width, p.height)
+                    val b = Bitmap.createBitmap((p.width * k).toInt(), (p.height * k).toInt(), Bitmap.Config.ARGB_8888)
+                    b.eraseColor(android.graphics.Color.WHITE)
+                    p.render(b, null, null, android.graphics.pdf.PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                    b
+                }
+            }
+        }
+    } else {
+        val raw = ctx.contentResolver.openInputStream(uri)!!.use { it.readBytes() }
+        Images.decode(raw, 1400)
+    }
+}.getOrNull()

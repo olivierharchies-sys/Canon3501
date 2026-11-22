@@ -13,7 +13,7 @@ import kotlin.math.sin
 // Algorithmes sans dépendance Android (testables sur PC) : détection, redressement, TIFF, PDF.
 
 /** Rectangle orienté : centre, taille, angle en degrés (sens horaire, y vers le bas), dans (-45, 45]. */
-data class RotRect(val cx: Float, val cy: Float, val w: Float, val h: Float, val angle: Float, val fill: Float = 1f)
+data class RotRect(val cx: Float, val cy: Float, val w: Float, val h: Float, val angle: Float, val fill: Float = 1f, val ink: Float = 1f)
 
 object Detect {
     private fun lum(c: Int) = ((c shr 16 and 255) * 30 + (c shr 8 and 255) * 59 + (c and 255) * 11) / 100
@@ -32,7 +32,7 @@ object Detect {
     }
 
     /** Masque « objet » : pixels sombres ou colorés, plus les bords (ombre d'une feuille blanche). */
-    private fun mask(px: IntArray, w: Int, h: Int): BooleanArray {
+    private fun mask(px: IntArray, w: Int, h: Int, ink: BooleanArray? = null): BooleanArray {
         val l = IntArray(px.size) { lum(px[it]) }
         val bg = bgLevel(l)
         // Flou 3×3 avant le gradient : réduit le grain du papier.
@@ -48,7 +48,9 @@ object Detect {
             val i = y * w + x
             val gx = s[i + 1] - s[i - 1]
             val gy = s[i + w] - s[i - w]
-            m[i] = l[i] < bg - 28 || sat(px[i]) > 32 || gx * gx + gy * gy > 14 * 14
+            val k = l[i] < bg - 28 || sat(px[i]) > 32
+            ink?.set(i, k)
+            m[i] = k || gx * gx + gy * gy > 14 * 14
         }
         return m
     }
@@ -87,7 +89,7 @@ object Detect {
         for (i in m.indices) if (!out[i]) m[i] = true
     }
 
-    private class Comp(var l: Int, var t: Int, var r: Int, var b: Int, val rows: HashMap<Int, IntArray>, var n: Int)
+    private class Comp(var l: Int, var t: Int, var r: Int, var b: Int, val rows: HashMap<Int, IntArray>, var n: Int, var ink: Int = 0)
 
     /** Enveloppe convexe (chaîne monotone). */
     private fun hull(p: List<Pair<Float, Float>>): List<Pair<Float, Float>> {
@@ -141,7 +143,8 @@ object Detect {
      */
     fun findDocs(px: IntArray, w: Int, h: Int, gap: Int = maxOf(3, w / 80)): List<RotRect> {
         val r = 2
-        val m = dilate(mask(px, w, h), w, h, r)
+        val ink = BooleanArray(px.size)
+        val m = dilate(mask(px, w, h, ink), w, h, r)
         fillHoles(m, w, h)
         // Composantes connexes.
         val seen = BooleanArray(m.size)
@@ -154,6 +157,7 @@ object Detect {
             while (top > 0) {
                 val i = st[--top]; val x = i % w; val y = i / w
                 c.n++
+                if (ink[i]) c.ink++
                 if (x < c.l) c.l = x; if (x > c.r) c.r = x; if (y < c.t) c.t = y; if (y > c.b) c.b = y
                 val row = c.rows.getOrPut(y) { intArrayOf(x, x) }
                 if (x < row[0]) row[0] = x; if (x > row[1]) row[1] = x
@@ -164,18 +168,22 @@ object Detect {
             }
             if (c.n >= 6) comps += c
         }
-        // Fusion des zones proches (lignes d'un même document).
+        // Fusion des zones proches (lignes d'un même document). Texte (peu d'encre) : écart plus large,
+        // pour ne pas découper une lettre en paragraphes.
+        val textGap = w / 17
+        fun sparse(c: Comp) = c.ink < c.n * 0.45f
         var merged = true
         while (merged) {
             merged = false
             loop@ for (i in comps.indices) for (j in i + 1 until comps.size) {
                 val a = comps[i]; val b = comps[j]
-                if (a.l - gap <= b.r && b.l - gap <= a.r && a.t - gap <= b.b && b.t - gap <= a.b) {
+                val g = if (sparse(a) && sparse(b)) textGap else gap
+                if (a.l - g <= b.r && b.l - g <= a.r && a.t - g <= b.b && b.t - g <= a.b) {
                     b.rows.forEach { (y, rr) ->
                         val ra = a.rows[y]
                         if (ra == null) a.rows[y] = rr else { ra[0] = minOf(ra[0], rr[0]); ra[1] = maxOf(ra[1], rr[1]) }
                     }
-                    a.l = minOf(a.l, b.l); a.t = minOf(a.t, b.t); a.r = maxOf(a.r, b.r); a.b = maxOf(a.b, b.b); a.n += b.n
+                    a.l = minOf(a.l, b.l); a.t = minOf(a.t, b.t); a.r = maxOf(a.r, b.r); a.b = maxOf(a.b, b.b); a.n += b.n; a.ink += b.ink
                     comps.removeAt(j); merged = true; break@loop
                 }
             }
@@ -191,7 +199,7 @@ object Detect {
             // Retire la marge ajoutée par la dilatation.
             val ww = rr.w - 2 * r - 4; val hh = rr.h - 2 * r - 4
             if (ww < 8 || hh < 8 || ww * hh < minArea) null
-            else rr.copy(w = ww, h = hh, fill = (c.n / (rr.w * rr.h)).coerceAtMost(1f))
+            else rr.copy(w = ww, h = hh, fill = (c.n / (rr.w * rr.h)).coerceAtMost(1f), ink = c.ink.toFloat() / c.n.coerceAtLeast(1))
         }
         val band = h / 12f
         return out.sortedWith(compareBy({ (it.cy / band).toInt() }, { it.cx }))

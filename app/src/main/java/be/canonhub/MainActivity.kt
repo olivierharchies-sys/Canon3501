@@ -45,6 +45,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Face
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Crop
 import androidx.compose.material.icons.filled.DocumentScanner
 import androidx.compose.material.icons.filled.HourglassEmpty
 import androidx.compose.material.icons.filled.Info
@@ -471,6 +472,7 @@ fun ScanScreen(m: Modifier, ip: String) {
     var detected by remember { mutableStateOf<String?>(null) }
     var askInterleave by remember { mutableStateOf(false) }
     var plan by remember { mutableStateOf<SavePlan?>(null) }
+    var cropIdx by remember { mutableStateOf<Int?>(null) }
     val target = out.target()
     val cur = pages.getOrNull(sel.coerceIn(0, (pages.size - 1).coerceAtLeast(0)))
 
@@ -478,7 +480,7 @@ fun ScanScreen(m: Modifier, ip: String) {
         val p = cur
         withContext(Dispatchers.Default) {
             val dec = p?.let { Images.decode(it.bytes, 1200) }
-            val pv = p?.let { Images.process(it.bytes, 1200, crop, bright, contrast, filt, it.rot, straight, fix) }
+            val pv = p?.let { Images.process(it.bytes, 1200, crop, bright, contrast, filt, it.rot, straight, fix, it.crop) }
             preview = pv
             detected = if (p == null || dec == null || pv == null) null else {
                 val (w, h) = Formats.physical(p.bytes, p.dpi, pv, dec.width)
@@ -512,7 +514,7 @@ fun ScanScreen(m: Modifier, ip: String) {
         }
     }
 
-    fun proc(p: Page, max: Int) = Images.process(p.bytes, max, crop, bright, contrast, filt, p.rot, straight, fix)
+    fun proc(p: Page, max: Int) = Images.process(p.bytes, max, crop, bright, contrast, filt, p.rot, straight, fix, p.crop)
     fun full(p: Page) = proc(p, 3508)
 
     /** Résolution réelle de l'image traitée (le décodage peut réduire). */
@@ -521,8 +523,48 @@ fun ScanScreen(m: Modifier, ip: String) {
         return (p.dpi / Images.sampleFor(ow, oh, 3508)).coerceAtLeast(1)
     }
 
-    /** Page prête à imprimer : A4 avec l'image à la taille choisie. */
-    fun printable(b: Bitmap): Bitmap = target?.let { Formats.onA4(b, it) } ?: b
+    val drv = rememberDriver(prefs0, true)
+
+    /** Feuille A4 prête à imprimer : taille choisie, sinon taille réelle si l'image est plus petite qu'un A4. */
+    fun sheetOf(p: Page, b: Bitmap): Bitmap {
+        target?.let { return Formats.onA4(b, it) }
+        val d = effDpi(p).toFloat()
+        val wCm = b.width / d * 2.54f; val hCm = b.height / d * 2.54f
+        return if (minOf(wCm, hCm) < 20f && maxOf(wCm, hCm) < 28.5f) Formats.onA4(b, wCm to hCm) else b
+    }
+
+    /** Impression : pilote intégré (voie des copies) si disponible, sinon fenêtre Android. */
+    suspend fun printPages(): String {
+        val route = prefs0.copyRoute.let { if (it == Route.Driver && !Gutenprint.available) Route.Android else it }
+        val gpDpi = when (prefs0.copyQuality) { Quality.Draft -> 150; Quality.Standard -> 200; Quality.High -> 300 }
+        val f = File(ctx.cacheDir, "scan.pdf")
+        // Une feuille à la fois : peu de mémoire même avec beaucoup de pages.
+        val n = withContext(Dispatchers.Default) {
+            val doc = android.graphics.pdf.PdfDocument()
+            var k = 0
+            for (p in pages) {
+                val b = full(p) ?: continue
+                val sh = sheetOf(p, b)
+                CopyLayout.addPdfPage(doc, sh, ++k, route != Route.Driver)
+                if (sh !== b) sh.recycle()
+            }
+            f.outputStream().use { doc.writeTo(it) }
+            doc.close()
+            k
+        }
+        if (n == 0) throw IOException("image illisible")
+        val u = Uri.fromFile(f)
+        if (route == Route.Driver && ip.isNotBlank()) {
+            return try {
+                driverFile(ctx, ip, drv, u, "application/pdf", color, 1, gpDpi) { msg = it }
+            } catch (e: Exception) {
+                androidPrint(ctx, u, "application/pdf")
+                "Pilote intégré : échec (${e.message}). Fenêtre Android ouverte."
+            }
+        }
+        androidPrint(ctx, u, "application/pdf")
+        return "Fenêtre d'impression ouverte."
+    }
 
     fun move(d: Int) {
         val i = sel; val j = i + d
@@ -729,6 +771,9 @@ fun ScanScreen(m: Modifier, ip: String) {
                     IconButton(enabled = !busy, onClick = {
                         pages = pages.toMutableList().also { l -> l[sel] = l[sel].rotated() }
                     }) { Icon(Icons.Filled.Refresh, "Tourner d'un quart de tour") }
+                    IconButton(enabled = !busy, onClick = { cropIdx = sel }) {
+                        Icon(Icons.Filled.Crop, "Choisir la zone", tint = if (cur?.crop != null) MaterialTheme.colorScheme.primary else androidx.compose.material3.LocalContentColor.current)
+                    }
                     IconButton(enabled = !busy, onClick = {
                         pages = pages.toMutableList().also { l -> l.removeAt(sel) }
                         sel = sel.coerceAtMost((pages.size - 1).coerceAtLeast(0))
@@ -808,19 +853,7 @@ fun ScanScreen(m: Modifier, ip: String) {
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(enabled = !busy, modifier = Modifier.weight(1f), onClick = {
-                        work("Préparation…") {
-                            if (pages.size == 1) {
-                                val b = withContext(Dispatchers.Default) { full(pages[0])?.let { printable(it) } } ?: throw IOException("image illisible")
-                                printBitmap(ctx, "scan", b)
-                            } else {
-                                val f = File(ctx.cacheDir, "scan.pdf")
-                                withContext(Dispatchers.IO) {
-                                    f.outputStream().use { o -> Images.pdfFromScans(pages, o) { p -> full(p)?.let { b -> printable(b) } } }
-                                }
-                                androidPrint(ctx, Uri.fromFile(f), "application/pdf")
-                            }
-                            "Fenêtre d'impression ouverte."
-                        }
+                        work("Préparation de l'impression…") { printPages() }
                     }) { Text("Imprimer") }
                     OutlinedButton(enabled = !busy, modifier = Modifier.weight(1f), onClick = {
                         work("Lecture du texte…") {
@@ -833,6 +866,19 @@ fun ScanScreen(m: Modifier, ip: String) {
                     }) { Text("Extraire le texte") }
                 }
             }
+        }
+        cropIdx?.let { ci ->
+            pages.getOrNull(ci)?.let { p ->
+                val (ow, oh) = bounds(p)
+                val cm = 2.54f / p.dpi
+                val full = if (p.rot % 180 == 0) ow * cm to oh * cm else oh * cm to ow * cm
+                CropDialog(
+                    p.crop, full, out, { out = it },
+                    load = { Images.decode(p.bytes, 1400)?.let { Images.rotate(it, p.rot) } },
+                    onDone = { c -> pages = pages.toMutableList().also { l -> l[ci] = p.withCrop(c) }; cropIdx = null },
+                    onCancel = { cropIdx = null },
+                )
+            } ?: run { cropIdx = null }
         }
         plan?.let { pl ->
             var dt by remember(pl) { mutableStateOf(pl.guess.type) }

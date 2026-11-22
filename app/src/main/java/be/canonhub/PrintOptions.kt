@@ -75,6 +75,30 @@ data class PrintOpts(
             (if (borderless) ", sans bordure" else "") + "."
 }
 
+/** Mises en page spéciales. */
+enum class Imposition(val label: String, val sub: String) {
+    Normal("Normale", "Pages par feuille au choix"),
+    Booklet("Livret", "Feuilles pliées en deux ; recto-verso manuel activé"),
+    Poster("Affiche", "Première page agrandie sur plusieurs feuilles, 1 cm de collage"),
+    Contact("Planche contact", "20 miniatures numérotées par feuille"),
+}
+
+/** Mise en page et ajouts : zone gardée, taille imposée (cm), filigrane, en-tête, numéros, miroir. */
+data class Extras(
+    val mode: Imposition = Imposition.Normal,
+    val poster: Int = 2,
+    val mirror: Boolean = false,
+    val watermark: String = "",
+    val numbers: Boolean = false,
+    val header: String = "",
+    val date: Boolean = false,
+    val crop: FloatArray? = null,
+    val size: Pair<Float, Float>? = null,
+) {
+    fun active() = mode != Imposition.Normal || mirror || watermark.isNotBlank() || numbers ||
+        header.isNotBlank() || date || crop != null || size != null
+}
+
 fun printOptsOf(s: String): PrintOpts = runCatching {
     val p = s.split("|")
     PrintOpts(Paper.valueOf(p[0]), MediaType.valueOf(p[1]), Quality.valueOf(p[2]), Orient.valueOf(p[3]),
@@ -130,34 +154,119 @@ object PrintPrep {
         }
         fun firstIsWide(): Boolean = image?.let { it.width > it.height }
             ?: pdf!!.openPage(0).use { it.width > it.height }
+        fun firstSize(): Pair<Int, Int> = image?.let { it.width to it.height }
+            ?: pdf!!.openPage(0).use { it.width to it.height }
         override fun close() { pdf?.close(); pfd?.close() }
     }
 
-    /** Construit un PDF au format choisi ; renvoie le fichier et l'orientation retenue. */
-    fun prepare(ctx: Context, uri: Uri, mime: String, o: PrintOpts, range: String = ""): Pair<File, Boolean> {
-        Source(ctx, uri, mime, o.quality.dpi).use { src ->
-            val landscape = when (o.orient) {
-                Orient.Portrait -> false
-                Orient.Landscape -> true
-                Orient.Auto -> if (o.nUp == 2) !src.firstIsWide() else src.firstIsWide()
+    /** Construit un PDF au format choisi (mises en page et ajouts compris) ; renvoie le fichier et l'orientation retenue. */
+    fun prepare(ctx: Context, uri: Uri, mime: String, o: PrintOpts, range: String = "", x: Extras = Extras()): Pair<File, Boolean> {
+        val posterN = if (x.mode == Imposition.Poster) x.poster.coerceIn(2, 4) else 1
+        Source(ctx, uri, mime, (o.quality.dpi * posterN).coerceAtMost(300)).use { src ->
+            val order = Gutenprint.parseRange(range, src.count)
+            val (fw, fh) = src.firstSize()
+            val c0 = x.crop
+            val wide = if (c0 == null) fw > fh else fw * (c0[2] - c0[0]) > fh * (c0[3] - c0[1])
+            val nUp = when (x.mode) { Imposition.Booklet -> 2; Imposition.Contact -> 20; Imposition.Poster -> 1; else -> o.nUp }
+            val landscape = when {
+                x.mode == Imposition.Booklet -> true
+                o.orient == Orient.Portrait -> false
+                o.orient == Orient.Landscape -> true
+                x.mode == Imposition.Contact -> false
+                nUp == 2 -> !wide
+                else -> wide
             }
             val m = o.paper.media
             var w = m.widthMils * MILS_TO_PT; var h = m.heightMils * MILS_TO_PT
             if (landscape) { val t = w; w = h; h = t }
             val margin = if (o.borderless) 0f else 8.5f   // 3 mm
-            val cells = cells(o.nUp, w, h, margin)
-            val doc = PdfDocument()
+            val top = if (x.header.isNotBlank() || x.date) 16f else 0f
+            val bottom = if (x.numbers) 16f else 0f
+            val area = RectF(margin, margin + top, w - margin, h - margin - bottom)
             val pt = paint(o)
-            val order = Gutenprint.parseRange(range, src.count)
-            var idx = 0; var sheet = 0
-            while (idx < order.size) {
-                val page = doc.startPage(PdfDocument.PageInfo.Builder(w.toInt(), h.toInt(), ++sheet).create())
-                for (cell in cells) {
-                    if (idx >= order.size) break
-                    val b = src.page(order[idx++])
-                    draw(page.canvas, b, cell, o.fill && o.nUp == 1, pt)
-                    if (mime == "application/pdf") b.recycle()
+            fun bmp(i: Int): Bitmap = Images.cropArea(src.page(i), x.crop)
+            fun done(b: Bitmap) { if (mime == "application/pdf") b.recycle() }
+            val label = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.DKGRAY; textSize = 8f; textAlign = Paint.Align.CENTER }
+
+            // Chaque feuille est une fonction de dessin.
+            val sheets = ArrayList<(Canvas) -> Unit>()
+            fun sheet(f: (Canvas) -> Unit) { sheets.add(f) }
+            when (x.mode) {
+                Imposition.Booklet -> {
+                    val cells = cells(2, area)
+                    val n = order.size
+                    val pad = (n + 3) / 4 * 4
+                    fun side(l: Int, r: Int): (Canvas) -> Unit = { c ->
+                        listOf(l, r).forEachIndexed { k, idx ->
+                            if (idx < n) { val b = bmp(order[idx]); draw(c, b, cells[k], false, pt); done(b) }
+                        }
+                    }
+                    for (s in 0 until pad / 4) {
+                        sheet(side(pad - 1 - 2 * s, 2 * s))
+                        sheet(side(2 * s + 1, pad - 2 - 2 * s))
+                    }
                 }
+                Imposition.Poster -> {
+                    val n = posterN
+                    val ov = 28.35f   // 1 cm de recouvrement pour coller
+                    val iw = area.width(); val ih = area.height()
+                    val tw = n * iw - (n - 1) * ov; val th = n * ih - (n - 1) * ov
+                    val guide = Paint().apply {
+                        color = Color.LTGRAY; strokeWidth = 0.6f; style = Paint.Style.STROKE
+                        pathEffect = android.graphics.DashPathEffect(floatArrayOf(4f, 4f), 0f)
+                    }
+                    val first = order.firstOrNull() ?: 0
+                    for (r in 0 until n) for (col in 0 until n) sheet { c ->
+                        val b = bmp(first)
+                        val s = minOf(tw / b.width, th / b.height)
+                        val dw = b.width * s; val dh = b.height * s
+                        val ox = (tw - dw) / 2; val oy = (th - dh) / 2
+                        c.save(); c.clipRect(area)
+                        c.translate(area.left - col * (iw - ov), area.top - r * (ih - ov))
+                        c.drawBitmap(b, null, RectF(ox, oy, ox + dw, oy + dh), pt)
+                        c.restore()
+                        done(b)
+                        if (col > 0) c.drawLine(area.left + ov, area.top, area.left + ov, area.bottom, guide)
+                        if (r > 0) c.drawLine(area.left, area.top + ov, area.right, area.top + ov, guide)
+                        c.drawText("Ligne ${r + 1} · colonne ${col + 1}", area.right - 50f, area.bottom - 4f, label)
+                    }
+                }
+                else -> {
+                    val cells = cells(nUp, area)
+                    val contact = x.mode == Imposition.Contact
+                    order.chunked(cells.size).forEach { chunk ->
+                        sheet { c ->
+                            chunk.forEachIndexed { k, idx ->
+                                val b = bmp(idx)
+                                var r = cells[k]
+                                if (contact) {
+                                    c.drawText("${idx + 1}", r.centerX(), r.bottom - 2f, label)
+                                    r = RectF(r.left, r.top, r.right, r.bottom - 11f)
+                                }
+                                val sz = x.size
+                                if (nUp == 1 && sz != null && !contact) {
+                                    // Taille imposée : centrée en haut de la zone, réduite seulement si elle déborde.
+                                    val (cw, ch) = Formats.fit(b.width, b.height, sz)
+                                    val k2 = minOf(1f, r.width() / (cw * CM_PT), r.height() / (ch * CM_PT))
+                                    val dw = cw * CM_PT * k2; val dh = ch * CM_PT * k2
+                                    c.drawBitmap(b, null, RectF(r.centerX() - dw / 2, r.top, r.centerX() + dw / 2, r.top + dh), pt)
+                                } else draw(c, b, r, o.fill && nUp == 1, pt)
+                                done(b)
+                            }
+                        }
+                    }
+                }
+            }
+
+            val doc = PdfDocument()
+            sheets.forEachIndexed { i, drawSheet ->
+                val page = doc.startPage(PdfDocument.PageInfo.Builder(w.toInt(), h.toInt(), i + 1).create())
+                val c = page.canvas
+                c.save()
+                if (x.mirror) c.scale(-1f, 1f, w / 2, 0f)
+                drawSheet(c)
+                additions(c, x, w, h, margin, i + 1, sheets.size)
+                c.restore()
                 doc.finishPage(page)
             }
             val f = File(ctx.cacheDir, "print-${System.currentTimeMillis()}.pdf")
@@ -167,20 +276,53 @@ object PrintPrep {
         }
     }
 
-    /** Cases de la feuille : 1, 2 (côte à côte sur la longueur) ou 4 (2×2) pages par feuille. */
-    private fun cells(n: Int, w: Float, h: Float, m: Float): List<RectF> {
-        val iw = w - 2 * m; val ih = h - 2 * m; val gap = if (n > 1) 6f else 0f
-        return when (n) {
-            2 -> if (w >= h) listOf(RectF(m, m, m + (iw - gap) / 2, m + ih), RectF(m + (iw + gap) / 2, m, m + iw, m + ih))
-                 else listOf(RectF(m, m, m + iw, m + (ih - gap) / 2), RectF(m, m + (ih + gap) / 2, m + iw, m + ih))
-            4 -> {
-                val cw = (iw - gap) / 2; val ch = (ih - gap) / 2
-                listOf(
-                    RectF(m, m, m + cw, m + ch), RectF(m + cw + gap, m, m + iw, m + ch),
-                    RectF(m, m + ch + gap, m + cw, m + ih), RectF(m + cw + gap, m + ch + gap, m + iw, m + ih),
-                )
+    private const val CM_PT = 72f / 2.54f
+
+    /** En-tête, date, numéros de feuille, filigrane. */
+    private fun additions(c: Canvas, x: Extras, w: Float, h: Float, m: Float, n: Int, total: Int) {
+        val tp = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.DKGRAY; textSize = 9f }
+        if (x.header.isNotBlank()) c.drawText(x.header, m + 4f, m + 11f, tp)
+        if (x.date) {
+            tp.textAlign = Paint.Align.RIGHT
+            c.drawText(java.text.SimpleDateFormat("dd/MM/yyyy", java.util.Locale.FRANCE).format(java.util.Date()), w - m - 4f, m + 11f, tp)
+        }
+        if (x.numbers) {
+            tp.textAlign = Paint.Align.CENTER
+            c.drawText("$n / $total", w / 2, h - m - 5f, tp)
+        }
+        val wm = x.watermark.trim()
+        if (wm.isNotEmpty()) {
+            val p = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.argb(60, 120, 120, 120); textAlign = Paint.Align.CENTER
+                typeface = android.graphics.Typeface.DEFAULT_BOLD; textSize = 100f
             }
-            else -> listOf(RectF(m, m, m + iw, m + ih))
+            val diag = kotlin.math.hypot(w, h)
+            p.textSize = (100f * diag * 0.7f / p.measureText(wm).coerceAtLeast(1f)).coerceAtMost(150f)
+            c.save()
+            c.rotate(-Math.toDegrees(kotlin.math.atan2(h.toDouble(), w.toDouble())).toFloat(), w / 2, h / 2)
+            c.drawText(wm, w / 2, h / 2 + p.textSize / 3, p)
+            c.restore()
+        }
+    }
+
+    /** Grille de [n] cases dans [a] : 1, 2, 4, 6, 9 ou 20 (planche contact). */
+    private fun cells(n: Int, a: RectF): List<RectF> {
+        val land = a.width() >= a.height()
+        val (cols, rows) = when (n) {
+            2 -> if (land) 2 to 1 else 1 to 2
+            4 -> 2 to 2
+            6 -> if (land) 3 to 2 else 2 to 3
+            9 -> 3 to 3
+            20 -> if (land) 5 to 4 else 4 to 5
+            else -> 1 to 1
+        }
+        val gap = if (n > 1) 6f else 0f
+        val cw = (a.width() - gap * (cols - 1)) / cols; val ch = (a.height() - gap * (rows - 1)) / rows
+        return (0 until rows).flatMap { r ->
+            (0 until cols).map { c ->
+                val l = a.left + c * (cw + gap); val t = a.top + r * (ch + gap)
+                RectF(l, t, l + cw, t + ch)
+            }
         }
     }
 

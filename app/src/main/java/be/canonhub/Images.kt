@@ -27,9 +27,11 @@ enum class Filter(val label: String) {
 /** Corrections automatiques : mode couleur, dépoussiérage, netteté. */
 data class Fix(val mode: Enhance.Mode = Enhance.Mode.None, val dust: Boolean = false, val sharp: Boolean = false)
 
-/** Page numérisée : JPEG brut, résolution, rotation en degrés. */
-class Page(val bytes: ByteArray, val dpi: Int, val rot: Int = 0) {
-    fun rotated(): Page = Page(bytes, dpi, (rot + 90) % 360)
+/** Page numérisée : JPEG brut, résolution, rotation en degrés, zone gardée (gauche, haut, droite, bas ; 0..1) ou null. */
+class Page(val bytes: ByteArray, val dpi: Int, val rot: Int = 0, val crop: FloatArray? = null) {
+    /** Quart de tour horaire : la zone gardée tourne avec l'image. */
+    fun rotated(): Page = Page(bytes, dpi, (rot + 90) % 360, crop?.let { c -> floatArrayOf(1f - c[3], c[0], 1f - c[1], c[2]) })
+    fun withCrop(c: FloatArray?): Page = Page(bytes, dpi, rot, c)
 }
 
 /** Traitements d'image et fabrication de PDF. */
@@ -157,8 +159,8 @@ object Images {
         val (px, d) = small(src, 600)
         val w = d.first; val h = px.size / w
         val found = Detect.findDocs(px, w, h)
-        // Un seul objet couvrant presque toute la vitre : rien à découper.
-        if (found.size == 1 && found[0].w * found[0].h > w * h * 0.92f) return emptyList()
+        // Un seul objet couvrant la vitre, ou une seule page de texte : rien à découper (marges gardées).
+        if (found.size == 1 && (found[0].w * found[0].h > w * h * 0.92f || found[0].ink < 0.45f)) return emptyList()
         return found.map { extract(src, it, d.second) }
     }
 
@@ -202,12 +204,23 @@ object Images {
         return b
     }
 
+    /** Garde la zone [a] (gauche, haut, droite, bas en fractions) ; image intacte si null. */
+    fun cropArea(src: Bitmap, a: FloatArray?): Bitmap {
+        if (a == null || a.size < 4) return src
+        val l = (a[0] * src.width).toInt().coerceIn(0, src.width - 1)
+        val t = (a[1] * src.height).toInt().coerceIn(0, src.height - 1)
+        val r = (a[2] * src.width).toInt().coerceIn(l + 1, src.width)
+        val b = (a[3] * src.height).toInt().coerceIn(t + 1, src.height)
+        if (l == 0 && t == 0 && r == src.width && b == src.height) return src
+        return Bitmap.createBitmap(src, l, t, r - l, b - t)
+    }
+
     fun process(
         bytes: ByteArray, maxDim: Int, crop: Boolean, bright: Float, contrast: Float,
-        filt: Filter = Filter.None, rot: Int = 0, straight: Boolean = crop, fix: Fix = Fix(),
+        filt: Filter = Filter.None, rot: Int = 0, straight: Boolean = crop, fix: Fix = Fix(), area: FloatArray? = null,
     ): Bitmap? {
         var b = decode(bytes, maxDim) ?: return null
-        b = rotate(b, rot)
+        b = cropArea(rotate(b, rot), area)
         b = when {
             crop && straight -> autoCrop(deskew(b))
             crop -> autoCrop(b)
