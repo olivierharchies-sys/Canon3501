@@ -31,7 +31,7 @@ import kotlinx.coroutines.withContext
  * (dossier de rangement) et nom. [guess] : classement proposé (OCR) ou « Document ».
  */
 @Composable
-fun SaveDocDialog(guess: Classify.Guess, type0: OutType, onSave: (OutType, DocType?, String) -> Unit, onDismiss: () -> Unit) {
+fun SaveDocDialog(guess: Classify.Guess, type0: OutType, onDismiss: () -> Unit, onSave: (OutType, DocType?, String) -> Unit) {
     var t by remember { mutableStateOf(type0) }
     var dt by remember { mutableStateOf<DocType?>(guess.type) }
     var name by remember { mutableStateOf(guess.name()) }
