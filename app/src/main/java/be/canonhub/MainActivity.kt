@@ -587,6 +587,8 @@ fun ScanScreen(m: Modifier, ip: String) {
     }
 
     val snack = LocalSnack.current
+    val splitAsk = remember { SplitAsk() }
+    SplitDialog(splitAsk)
     fun work(label: String, block: suspend () -> String) {
         job = scope.launch {
             busy = true; msg = label; progress = 0f
@@ -603,13 +605,28 @@ fun ScanScreen(m: Modifier, ip: String) {
     }
 
     /** Documents posés sur la vitre ; [all] : garder aussi un document seul (recadré, redressé). */
-    suspend fun splitPage(p: Page, all: Boolean): List<Page> = withContext(Dispatchers.Default) {
-        val (ow, oh) = bounds(p)
-        val b = Images.decode(p.bytes, 4000)?.let { Images.rotate(it, p.rot) } ?: throw IOException("image illisible")
-        val origW = if (p.rot % 180 == 0) ow else oh
-        val d = (p.dpi * b.width / origW.coerceAtLeast(1)).coerceAtLeast(1)
-        val docs = Images.documents(b)
-        (if (all || docs.size >= 2) docs else emptyList()).map { Page(Images.jpeg(it, 92), d) }
+    suspend fun splitPage(p: Page, all: Boolean): List<Page> {
+        val (b, d, docs) = withContext(Dispatchers.Default) {
+            val (ow, oh) = bounds(p)
+            val b = Images.decode(p.bytes, 4000)?.let { Images.rotate(it, p.rot) } ?: throw IOException("image illisible")
+            val origW = if (p.rot % 180 == 0) ow else oh
+            val d = (p.dpi * b.width / origW.coerceAtLeast(1)).coerceAtLeast(1)
+            Triple(b, d, Images.documents(b))
+        }
+        // Numérisation auto : plusieurs documents → confirmation (un seul document coupé en morceaux ?).
+        if (all && docs.size >= 2) {
+            val (pv, ext) = withContext(Dispatchers.Default) {
+                val k = 1000f / maxOf(b.width, b.height)
+                val pv = if (k < 1f) Bitmap.createScaledBitmap(b, (b.width * k).toInt(), (b.height * k).toInt(), true) else b
+                pv to Images.docExtents(b, d.toFloat())
+            }
+            if (ext.size >= 2 && !splitAsk.ask(pv, SplitAsk.toPx(ext, d * pv.width.toFloat() / b.width))) {
+                return withContext(Dispatchers.Default) {
+                    listOf(Page(Images.jpeg(Images.cropArea(b, SplitAsk.union(ext, d.toFloat(), b.width, b.height)), 92), d))
+                }
+            }
+        }
+        return withContext(Dispatchers.Default) { (if (all || docs.size >= 2) docs else emptyList()).map { Page(Images.jpeg(it, 92), d) } }
     }
 
     /** Écrit un groupe de pages dans le type choisi ; renvoie le texte OCR éventuel. */

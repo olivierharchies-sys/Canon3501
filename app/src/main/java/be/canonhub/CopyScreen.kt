@@ -131,6 +131,8 @@ fun CopyScreen(m: Modifier, prefs: PrinterPrefs, ip: String) {
     var auto by remember { mutableStateOf(prefs.bool("copyAuto", false)) }
     var keep by remember { mutableStateOf(prefs.bool("copyKeep", true)) }
     val drv = rememberDriver(prefs, route == Route.Driver)
+    val splitAsk = remember { SplitAsk() }
+    SplitDialog(splitAsk)
     val gpDpi = when (quality) { Quality.Draft -> 150; Quality.Standard -> 200; Quality.High -> 300 }
 
     /**
@@ -223,9 +225,11 @@ fun CopyScreen(m: Modifier, prefs: PrinterPrefs, ip: String) {
     suspend fun autoCopy(): String {
         msg = "Prénumérisation…"
         val pre = ScanService.keep(ctx) { Escl.scan(ip, 75, true, Area.A4) }
-        val ext = withContext(Dispatchers.Default) {
-            Images.decode(pre, 1000)?.let { b -> Images.docExtents(b, 75f * b.width / (Area.A4.w * 75 / 300).coerceAtLeast(1)) }
-        } ?: throw IOException("prénumérisation illisible")
+        val preImg = withContext(Dispatchers.Default) { Images.decode(pre, 1000) } ?: throw IOException("prénumérisation illisible")
+        val preDpi = 75f * preImg.width / (Area.A4.w * 75 / 300).coerceAtLeast(1)
+        val ext = withContext(Dispatchers.Default) { Images.docExtents(preImg, preDpi) }
+        // Plusieurs documents : l'utilisateur confirme (un seul document peut être coupé en morceaux).
+        val one = ext.size >= 2 && !splitAsk.ask(preImg, SplitAsk.toPx(ext, preDpi))
         if (ext.isEmpty()) {
             msg = "Page entière détectée. Numérisation…"
             return add(CopyItem(Page(ScanService.keep(ctx) { Escl.scan(ip, dpi, color, Area.A4) }, dpi)))
@@ -234,12 +238,13 @@ fun CopyScreen(m: Modifier, prefs: PrinterPrefs, ip: String) {
         val r = ext.maxOf { it.right } + 3f; val btm = ext.maxOf { it.bottom } + 3f
         val zone = listOf(Area.Card, Area.Photo, Area.A5, Area.A4)
             .firstOrNull { it.w / 300f * 25.4f >= r && it.h / 300f * 25.4f >= btm } ?: Area.A4
-        msg = "${ext.size} document(s) détecté(s), zone ${zone.label}. Numérisation…"
+        msg = "${if (one) 1 else ext.size} document(s), zone ${zone.label}. Numérisation…"
         val b = ScanService.keep(ctx) { Escl.scan(ip, dpi, color, zone) }
         val docs = withContext(Dispatchers.Default) {
             val img = Images.decode(b, 4000) ?: throw IOException("image illisible")
             val d = (dpi * img.width / (zone.w * dpi / 300).coerceAtLeast(1)).coerceAtLeast(1)
-            Images.documents(img).map { Page(Images.jpeg(it, 92), d) }
+            if (one) listOf(Page(Images.jpeg(Images.cropArea(img, SplitAsk.union(ext, d.toFloat(), img.width, img.height)), 92), d))
+            else Images.documents(img).map { Page(Images.jpeg(it, 92), d) }
         }
         if (docs.isEmpty()) return add(CopyItem(Page(b, dpi)))
         msg = "Mise en page…"

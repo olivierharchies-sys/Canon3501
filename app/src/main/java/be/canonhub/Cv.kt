@@ -62,6 +62,17 @@ object Cv {
             clearBorders(mask, w, h)
             clearBorders(dark, w, h)
 
+            // Bord d'une feuille blanche : contraste très faible mais trait long et droit (Hough).
+            // Il ferme le contour du document : ses zones blanches ne le coupent plus en morceaux.
+            val weak = m(); Imgproc.Canny(blur, weak, 6.0, 18.0)
+            clearBorders(weak, w, h)
+            val segs = m()
+            Imgproc.HoughLinesP(weak, segs, 1.0, Math.PI / 360, maxOf(20, w / 12), (w / 8).toDouble(), 3.0)
+            for (i in 0 until segs.rows()) {
+                val l = segs.get(i, 0) ?: continue
+                Imgproc.line(mask, Point(l[0], l[1]), Point(l[2], l[3]), Scalar(255.0), 2)
+            }
+
             val kc = maxOf(3, w / 150).toDouble()
             Imgproc.morphologyEx(mask, mask, Imgproc.MORPH_CLOSE, keep(Imgproc.getStructuringElement(Imgproc.MORPH_ELLIPSE, Size(kc, kc))))
 
