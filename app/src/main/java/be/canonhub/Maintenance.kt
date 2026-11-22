@@ -214,8 +214,9 @@ object Bjnp {
                         val ack = ByteArray(n).also { b -> i.readFully(b) }
                         val got = if (n >= 4) ByteBuffer.wrap(ack).int else 0
                         if (got <= 0) {
-                            if (++idle > 120) throw IOException("imprimante n'accepte plus de données")
-                            Thread.sleep(500)
+                            // Relance rapide : une pause longue laisse la tête attendre les données (impression saccadée).
+                            if (++idle > 1200) throw IOException("imprimante n'accepte plus de données")
+                            Thread.sleep(50)
                         } else { idle = 0; off += minOf(got, chunk.size) }
                     }
                 }

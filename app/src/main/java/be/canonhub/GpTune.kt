@@ -167,6 +167,12 @@ fun GpTuneScreen(m: Modifier, prefs: PrinterPrefs, ip: String) {
             Knob("Échelle (%)", t.scale * 100, 90f..110f, step = 0.5f) { set(t.copy(scale = it / 100)) }
         }
 
+        Section("Séchage", Icons.Filled.Print, sub = if (t.dry == 0) "Aucune pause entre les pages" else "${t.dry} s entre chaque page") {
+            OptChips("Pause avant la page suivante", listOf(0, 5, 10, 20, 30, 60), t.dry,
+                { if (it == 0) "Aucune" else "$it s" }) { set(t.copy(dry = it)) }
+            Hint("Haute qualité, photo, papier glacé : l'encre sèche avant que la feuille suivante tombe dessus. Pas de pause entre les passes de la tête (réglage interne de l'imprimante).")
+        }
+
         Section("Dépannage", Icons.Filled.Settings) {
             Toggle("Afficher le diagnostic après envoi", t.diag) { set(t.copy(diag = it)) }
             Hint("État de l'imprimante et début du flux, à copier en cas de problème.")

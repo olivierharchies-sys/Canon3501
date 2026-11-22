@@ -130,6 +130,7 @@ fun CopyScreen(m: Modifier, prefs: PrinterPrefs, ip: String) {
     var sel by remember { mutableIntStateOf(0) }
     var auto by remember { mutableStateOf(prefs.bool("copyAuto", false)) }
     var keep by remember { mutableStateOf(prefs.bool("copyKeep", true)) }
+    var count by remember { mutableIntStateOf(prefs.int("copyCount", 0)) }
     val drv = rememberDriver(prefs, route == Route.Driver)
     val splitAsk = remember { SplitAsk() }
     SplitDialog(splitAsk)
@@ -219,37 +220,52 @@ fun CopyScreen(m: Modifier, prefs: PrinterPrefs, ip: String) {
     suspend fun add(item: CopyItem): String = add(listOf(item))
 
     /**
-     * Détection automatique : prénumérisation rapide (75 dpi), choix de la plus petite zone
-     * qui contient les documents, numérisation, puis un document par image détectée.
+     * Détection automatique en un seul passage : vitre entière numérisée, documents détectés
+     * sur cette image (plus de prénumérisation : un aller-retour du chariot en moins).
      */
-    suspend fun autoCopy(): String {
+    /** 600 dpi et plus : prénumérisation rapide, plus petite zone (depuis le coin repère) contenant les documents. */
+    suspend fun prescanZone(): Area {
         msg = "Prénumérisation…"
         val pre = ScanService.keep(ctx) { Escl.scan(ip, 75, true, Area.A4) }
-        val preImg = withContext(Dispatchers.Default) { Images.decode(pre, 1000) } ?: throw IOException("prénumérisation illisible")
-        val preDpi = 75f * preImg.width / (Area.A4.w * 75 / 300).coerceAtLeast(1)
-        val ext = withContext(Dispatchers.Default) { Images.docExtents(preImg, preDpi) }
-        // Plusieurs documents : l'utilisateur confirme (un seul document peut être coupé en morceaux).
-        val one = ext.size >= 2 && !splitAsk.ask(preImg, SplitAsk.toPx(ext, preDpi))
-        if (ext.isEmpty()) {
-            msg = "Page entière détectée. Numérisation…"
-            return add(CopyItem(Page(ScanService.keep(ctx) { Escl.scan(ip, dpi, color, Area.A4) }, dpi)))
+        val ext = withContext(Dispatchers.Default) {
+            Images.decode(pre, 1000)?.let { b -> Images.docExtents(b, 75f * b.width / (Area.A4.w * 75 / 300).coerceAtLeast(1), count) }
         }
-        // Plus petite zone (depuis le coin repère) qui contient tout, avec 3 mm de marge.
+        if (ext.isNullOrEmpty()) return Area.A4
         val r = ext.maxOf { it.right } + 3f; val btm = ext.maxOf { it.bottom } + 3f
-        val zone = listOf(Area.Card, Area.Photo, Area.A5, Area.A4)
+        return listOf(Area.Card, Area.Photo, Area.A5, Area.A4)
             .firstOrNull { it.w / 300f * 25.4f >= r && it.h / 300f * 25.4f >= btm } ?: Area.A4
-        msg = "${if (one) 1 else ext.size} document(s), zone ${zone.label}. Numérisation…"
+    }
+
+    suspend fun autoCopy(): String {
+        val t0 = System.currentTimeMillis()
+        // Jusqu'à 300 dpi, un seul passage (plus rapide) ; au-delà, la zone réduite compense la prénumérisation.
+        val zone = if (dpi >= 600) prescanZone() else Area.A4
+        msg = "Numérisation (${zone.label})…"
         val b = ScanService.keep(ctx) { Escl.scan(ip, dpi, color, zone) }
-        val docs = withContext(Dispatchers.Default) {
+        msg = "Recherche des documents…"
+        val (img, d) = withContext(Dispatchers.Default) {
             val img = Images.decode(b, 4000) ?: throw IOException("image illisible")
-            val d = (dpi * img.width / (zone.w * dpi / 300).coerceAtLeast(1)).coerceAtLeast(1)
-            if (one) listOf(Page(Images.jpeg(Images.cropArea(img, SplitAsk.union(ext, d.toFloat(), img.width, img.height)), 92), d))
-            else Images.documents(img).map { Page(Images.jpeg(it, 92), d) }
+            img to (dpi * img.width / (zone.w * dpi / 300).coerceAtLeast(1)).coerceAtLeast(1)
         }
-        if (docs.isEmpty()) return add(CopyItem(Page(b, dpi)))
+        val found = withContext(Dispatchers.Default) { Images.documents(img, count) }
+        // Nombre annoncé non atteint : aperçu, l'utilisateur continue ou repositionne.
+        if (count > 1 && found.size < count) {
+            val (pv, ext) = withContext(Dispatchers.Default) {
+                val k = 1000f / maxOf(img.width, img.height)
+                val pv = if (k < 1f) Bitmap.createScaledBitmap(img, (img.width * k).toInt(), (img.height * k).toInt(), true) else img
+                pv to Images.docExtents(img, d.toFloat(), count)
+            }
+            if (!splitAsk.missing(pv, SplitAsk.toPx(ext, d * pv.width.toFloat() / img.width), count)) {
+                return "Annulé : espacez les documents puis relancez."
+            }
+        }
+        val docs = withContext(Dispatchers.Default) { found.map { Page(Images.jpeg(it, 92), d) } }
         msg = "Mise en page…"
+        val r = if (docs.isEmpty()) add(CopyItem(Page(b, dpi)))
         // Plusieurs documents : regroupés à taille réelle ; un seul : une feuille.
-        return add(docs.map { CopyItem(it) }, if (docs.size > 1) PageLayout.Pack else PageLayout.One)
+        else add(docs.map { CopyItem(it) }, if (docs.size > 1) PageLayout.Pack else PageLayout.One)
+        val n = if (docs.isEmpty()) "Page entière" else "${docs.size} document(s)"
+        return "$n · ${(System.currentTimeMillis() - t0) / 1000} s. $r"
     }
 
     fun scanNow() {
@@ -257,11 +273,13 @@ fun CopyScreen(m: Modifier, prefs: PrinterPrefs, ip: String) {
             busy = true; msg = "Numérisation en cours…"
             msg = try {
                 if (auto && area != Area.Card) { msg = autoCopy(); busy = false; return@launch }
+                val t0 = System.currentTimeMillis()
                 val b = ScanService.keep(ctx) { Escl.scan(ip, dpi, color, area) }
                 val f = front
                 if (area != Area.Card) {
                     msg = "Mise en page…"
-                    add(CopyItem(Page(b, dpi)))
+                    val r = add(CopyItem(Page(b, dpi)))
+                    "$r (${(System.currentTimeMillis() - t0) / 1000} s)"
                 } else if (f == null) {
                     front = withContext(Dispatchers.Default) { Images.decode(b, 3508) } ?: throw IOException("image illisible")
                     "Recto lu. Retournez la carte au même endroit, puis « Lire le verso »."
@@ -318,7 +336,10 @@ fun CopyScreen(m: Modifier, prefs: PrinterPrefs, ip: String) {
                 if (it) { area = Area.A4; front = null }
             }
             // Détection automatique : format et nombre de documents imposés par la prénumérisation.
-            if (auto) Hint("Format et nombre de documents détectés. Carte recto/verso : désactivez la détection.")
+            if (auto) {
+                Hint("Format et nombre de documents détectés. Carte recto/verso : désactivez la détection.")
+                DocCount(count) { count = it; prefs.setInt("copyCount", it) }
+            }
             else {
                 ChoiceGrid(Area.entries, area, 2, ::areaLabel, ::areaSub, ::areaIcon, accent = Brand.Copy[1]) { area = it; front = null }
                 if (area == Area.Card) CardSteps(front != null)

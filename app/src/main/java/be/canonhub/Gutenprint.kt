@@ -81,6 +81,8 @@ object Gutenprint {
         val imageType: String = "", val dither: String = "",
         val dpi: Int = 0, val shiftX: Float = 0f, val shiftY: Float = 0f, val scale: Float = 1f,
         val diag: Boolean = false,
+        /** Séchage (s) avant chaque page suivante : évite de tacher la feuille déjà imprimée. */
+        val dry: Int = 0,
     ) {
         /** Réglages d'origine (diagnostic exclu). */
         fun isDefault() = copy(diag = false) == Tune()
@@ -110,7 +112,7 @@ object Gutenprint {
             p.getFloat("cya", d.cyan), p.getFloat("mag", d.magenta), p.getFloat("yel", d.yellow),
             p.getString("img", "") ?: "", p.getString("dit", "") ?: "",
             p.getInt("dpi", 0), p.getFloat("sx", 0f), p.getFloat("sy", 0f), p.getFloat("sc", 1f),
-            p.getBoolean("diag", false),
+            p.getBoolean("diag", false), p.getInt("dry", 0),
         )
     }
 
@@ -120,7 +122,7 @@ object Gutenprint {
         .putFloat("cya", t.cyan).putFloat("mag", t.magenta).putFloat("yel", t.yellow)
         .putString("img", t.imageType).putString("dit", t.dither)
         .putInt("dpi", t.dpi).putFloat("sx", t.shiftX).putFloat("sy", t.shiftY).putFloat("sc", t.scale)
-        .putBoolean("diag", t.diag).apply()
+        .putBoolean("diag", t.diag).putInt("dry", t.dry).apply()
 
     private fun kv(sel: Map<String, String>, borderless: Boolean, t: Tune = Tune()): Array<String> =
         (sel.filterValues { it.isNotEmpty() }.map { (k, v) -> "$k=$v" } + t.kv() + "b:FullBleed=${if (borderless) 1 else 0}").toTypedArray()
@@ -265,70 +267,99 @@ object Gutenprint {
         val wPt = a[3] - a[2]; val hPt = a[4] - a[5]
         if (wPt <= 0 || hPt <= 0) throw IOException("format refusé par le pilote")
         val w = (wPt * dpi / 72).toInt(); val h = (hPt * dpi / 72).toInt()
-        val out = File(ctx.cacheDir, "gp-${System.currentTimeMillis()}.bin")
-        try {
-            Pages(ctx, uri, mime).use { pages ->
-                val err = nBegin(k, w, h)
-                if (err.isNotEmpty()) throw IOException("pilote : $err")
-                out.outputStream().buffered().use { o ->
-                    val page = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-                    val rgb = ByteArray(w * h * 3)
-                    // Décalage (mm) et échelle réglés dans « Réglage du pilote ».
-                    val px = dpi / 25.4f
-                    // truePage : la feuille entière (taille réelle), marges comprises ; sinon la zone imprimable.
-                    val base = if (truePage) RectF(
-                        (-a[2] * dpi / 72).toFloat(), (-a[5] * dpi / 72).toFloat(),
-                        ((a[0] - a[2]) * dpi / 72).toFloat(), ((a[1] - a[5]) * dpi / 72).toFloat(),
-                    ) else RectF(0f, 0f, w.toFloat(), h.toFloat())
-                    val cx = base.centerX() + t.shiftX * px; val cy = base.centerY() + t.shiftY * px
-                    val bw = base.width() * t.scale / 2; val bh = base.height() * t.scale / 2
-                    val box = RectF(cx - bw, cy - bh, cx + bw, cy + bh)
-                    // Même case tournée d'un quart de tour, pour les pages en paysage.
-                    val boxL = RectF(cx - bh, cy - bw, cx + bh, cy + bw)
-                    val row = IntArray(w)
-                    val seq = sequence(job, pages.count)
-                    seq.forEachIndexed { n, i ->
-                        withContext(Dispatchers.Main) { onStep("préparation page ${n + 1}/${seq.size}") }
-                        page.eraseColor(Color.WHITE)
-                        val land = when (job.orient) {
-                            Orient.Portrait -> false
-                            Orient.Landscape -> true
-                            Orient.Auto -> pages.isWide(i)
-                        }
-                        val cv = Canvas(page)
-                        if (land) {
-                            cv.save(); cv.rotate(-90f, cx, cy)
-                            pages.drawInto(i, cv, boxL, fill)
-                            cv.restore()
-                        } else pages.drawInto(i, cv, box, fill)
-                        var p = 0
-                        for (y in 0 until h) {
-                            page.getPixels(row, 0, w, 0, y, w, 1)
-                            for (c in row) { rgb[p++] = (c shr 16).toByte(); rgb[p++] = (c shr 8).toByte(); rgb[p++] = c.toByte() }
-                        }
-                        val data = nPage(rgb, w, h) ?: throw IOException("pilote : ${nLastError().ifEmpty { "page refusée" }}")
-                        o.write(data)
-                    }
-                    o.write(nEnd())
-                    page.recycle()
-                }
-            }
-            withContext(Dispatchers.Main) { onStep("envoi à l'imprimante (${out.length() / 1024} Ko)…") }
+        val main = android.os.Handler(android.os.Looper.getMainLooper())
+        fun step(m: String) { main.post { onStep(m) } }
+        var sent = 0L
+        val head = java.io.ByteArrayOutputStream()
+        fun note(d: ByteArray): ByteArray {
+            sent += d.size
+            if (head.size() < 600) head.write(d, 0, minOf(d.size, 600 - head.size()))
+            return d
+        }
+        Pages(ctx, uri, mime).use { pages ->
+            val page = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            val rgb = ByteArray(w * h * 3)
+            // Décalage (mm) et échelle réglés dans « Réglage du pilote ».
+            val px = dpi / 25.4f
+            // truePage : la feuille entière (taille réelle), marges comprises ; sinon la zone imprimable.
+            val base = if (truePage) RectF(
+                (-a[2] * dpi / 72).toFloat(), (-a[5] * dpi / 72).toFloat(),
+                ((a[0] - a[2]) * dpi / 72).toFloat(), ((a[1] - a[5]) * dpi / 72).toFloat(),
+            ) else RectF(0f, 0f, w.toFloat(), h.toFloat())
+            val cx = base.centerX() + t.shiftX * px; val cy = base.centerY() + t.shiftY * px
+            val bw = base.width() * t.scale / 2; val bh = base.height() * t.scale / 2
+            val box = RectF(cx - bw, cy - bh, cx + bw, cy + bh)
+            // Même case tournée d'un quart de tour, pour les pages en paysage.
+            val boxL = RectF(cx - bh, cy - bw, cx + bh, cy + bw)
+            val row = IntArray(w)
+            val seq = sequence(job, pages.count)
+            // Flux continu : chaque page est envoyée dès qu'elle est calculée ; l'imprimante démarre
+            // pendant le calcul des suivantes.
+            // Séchage : une tâche par page et pause entre les tâches (une tâche ouverte sans données
+            // pourrait être abandonnée par l'imprimante).
             // Gutenprint n'entoure pas le flux G3000 du XML Canon (début/fin de travail, passage en mode
             // impression) : sans lui, la G3501 accepte les données mais n'imprime rien. On l'ajoute,
             // comme pour les commandes d'entretien.
-            val job = listOf(CanonTools.XML_START, CanonTools.XML_MODE) + chunks(out) + listOf(CanonTools.XML_END)
-            Bjnp.send(ip, job, title = "CanonHub", timeout = 120_000)
-            if (!t.diag) return@withContext "Envoyé à l'imprimante par le pilote intégré (${out.length() / 1024} Ko)."
-            // Diagnostic : début du flux (XML Canon + commandes) et état de l'imprimante 3 s après.
-            val head = out.inputStream().use { val b = ByteArray(600); val n = it.read(b); b.copyOf(maxOf(n, 0)) }
-            val txt = head.map { val c = it.toInt() and 0xFF; if (c in 32..126) c.toChar() else if (c == 0x1B) '␛' else '·' }.joinToString("")
-            Thread.sleep(3000)
-            val st = runCatching { Bjnp.readable(Bjnp.status(ip)) }.getOrElse { "illisible" }
-            "Envoyé à l'imprimante par le pilote intégré (${out.length() / 1024} Ko).\nÉtat : $st\nDébut du flux : $txt"
-        } finally {
-            out.delete()
+            val groups = if (t.dry > 0 && seq.size > 1) seq.map { listOf(it) } else listOf(seq)
+            var n = 0
+            try {
+                groups.forEachIndexed { gi, g ->
+                    if (gi > 0) {
+                        step("séchage ${t.dry} s avant la page ${n + 1}…")
+                        Thread.sleep(t.dry * 1000L)
+                    }
+                    val err = nBegin(k, w, h)
+                    if (err.isNotEmpty()) throw IOException("pilote : $err")
+                    var fail: Exception? = null
+                    val parts = kotlin.sequences.sequence {
+                        yield(CanonTools.XML_START); yield(CanonTools.XML_MODE)
+                        // Erreur de calcul : la tâche est quand même fermée proprement (pas de travail
+                        // à moitié reçu bloqué dans l'imprimante), puis l'erreur est remontée.
+                        try {
+                            for (i in g) {
+                                n++
+                                step("préparation page $n/${seq.size}")
+                                page.eraseColor(Color.WHITE)
+                                val land = when (job.orient) {
+                                    Orient.Portrait -> false
+                                    Orient.Landscape -> true
+                                    Orient.Auto -> pages.isWide(i)
+                                }
+                                val cv = Canvas(page)
+                                if (land) {
+                                    cv.save(); cv.rotate(-90f, cx, cy)
+                                    pages.drawInto(i, cv, boxL, fill)
+                                    cv.restore()
+                                } else pages.drawInto(i, cv, box, fill)
+                                var p = 0
+                                for (y in 0 until h) {
+                                    page.getPixels(row, 0, w, 0, y, w, 1)
+                                    for (c in row) { rgb[p++] = (c shr 16).toByte(); rgb[p++] = (c shr 8).toByte(); rgb[p++] = c.toByte() }
+                                }
+                                val data = nPage(rgb, w, h) ?: throw IOException("pilote : ${nLastError().ifEmpty { "page refusée" }}")
+                                step("envoi page $n/${seq.size} (${data.size / 1024} Ko)…")
+                                yield(note(data))
+                            }
+                        } catch (e: Exception) {
+                            fail = e
+                        }
+                        yield(note(nEnd()))
+                        yield(CanonTools.XML_END)
+                    }
+                    Bjnp.send(ip, parts.asIterable(), title = "CanonHub", timeout = 120_000)
+                    fail?.let { throw it }
+                }
+            } finally {
+                page.recycle()
+            }
         }
+        val kb = sent / 1024
+        if (!t.diag) return@withContext "Envoyé à l'imprimante par le pilote intégré ($kb Ko)."
+        // Diagnostic : début du flux Gutenprint et état de l'imprimante 3 s après.
+        val txt = head.toByteArray().map { val c = it.toInt() and 0xFF; if (c in 32..126) c.toChar() else if (c == 0x1B) '␛' else '·' }.joinToString("")
+        Thread.sleep(3000)
+        val st = runCatching { Bjnp.readable(Bjnp.status(ip)) }.getOrElse { "illisible" }
+        "Envoyé à l'imprimante par le pilote intégré ($kb Ko).\nÉtat : $st\nDébut du flux : $txt"
     }
 
     /** Lecture du fichier par blocs de 64 Ko, une trame BJNP par bloc. */

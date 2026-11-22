@@ -156,31 +156,67 @@ object Images {
         return out
     }
 
-    /** Documents posés sur la vitre, chacun découpé et redressé ; vide si aucun. */
-    fun documents(src: Bitmap): List<Bitmap> {
+    /** Coins d'un rectangle orienté. */
+    private fun corners(r: RotRect): List<Pair<Float, Float>> {
+        val a = Math.toRadians(r.angle.toDouble())
+        val ux = kotlin.math.cos(a).toFloat(); val uy = kotlin.math.sin(a).toFloat()
+        val hw = r.w / 2; val hh = r.h / 2
+        return listOf(-1f to -1f, 1f to -1f, 1f to 1f, -1f to 1f).map { (sx, sy) ->
+            (r.cx + sx * hw * ux - sy * hh * uy) to (r.cy + sx * hw * uy + sy * hh * ux)
+        }
+    }
+
+    /** Écart entre les boîtes droites de deux rectangles (0 s'ils se chevauchent). */
+    private fun gapOf(a: RotRect, b: RotRect): Float {
+        val ca = corners(a); val cb = corners(b)
+        val dx = maxOf(cb.minOf { it.first } - ca.maxOf { it.first }, ca.minOf { it.first } - cb.maxOf { it.first }, 0f)
+        val dy = maxOf(cb.minOf { it.second } - ca.maxOf { it.second }, ca.minOf { it.second } - cb.maxOf { it.second }, 0f)
+        return kotlin.math.hypot(dx, dy)
+    }
+
+    /** Nombre attendu plus petit que le nombre trouvé : fusionne les morceaux les plus proches. */
+    private fun mergeTo(found: List<RotRect>, n: Int): List<RotRect> {
+        val l = found.toMutableList()
+        while (l.size > n && l.size >= 2) {
+            var bi = 0; var bj = 1; var best = Float.MAX_VALUE
+            for (i in l.indices) for (j in i + 1 until l.size) {
+                val g = gapOf(l[i], l[j]); if (g < best) { best = g; bi = i; bj = j }
+            }
+            val a = l[bi]; val b = l[bj]
+            val m = Detect.minRect(corners(a) + corners(b)) ?: break
+            val ink = (a.ink * a.w * a.h + b.ink * b.w * b.h) / (a.w * a.h + b.w * b.h).coerceAtLeast(1f)
+            l.removeAt(bj); l[bi] = m.copy(ink = ink)
+        }
+        return l
+    }
+
+    /** Détection sur l'image réduite ; [expected] > 0 : nombre de documents annoncé par l'utilisateur. */
+    private fun locate(src: Bitmap, expected: Int): Pair<List<RotRect>, Float>? {
         val (px, d) = small(src, 600)
         val w = d.first; val h = px.size / w
-        val found = Cv.findDocs(px, w, h)?.takeIf { it.isNotEmpty() } ?: Detect.findDocs(px, w, h)
-        // Un seul objet couvrant la vitre, ou une seule page de texte : rien à découper (marges gardées).
-        if (found.size == 1 && (found[0].w * found[0].h > w * h * 0.92f || found[0].ink < 0.45f)) return emptyList()
-        return found.map { extract(src, it, d.second) }
+        var found = Cv.findDocs(px, w, h)?.takeIf { it.isNotEmpty() } ?: Detect.findDocs(px, w, h)
+        if (expected > 0 && found.size > expected) found = mergeTo(found, expected)
+        // Un seul objet couvrant la vitre, ou une page de texte non annoncée : rien à découper (marges gardées).
+        if (found.size == 1 && (found[0].w * found[0].h > w * h * 0.92f || (expected == 0 && found[0].ink < 0.45f))) return null
+        return found to d.second
+    }
+
+    /** Documents posés sur la vitre, chacun découpé et redressé ; vide si aucun. */
+    fun documents(src: Bitmap, expected: Int = 0): List<Bitmap> {
+        val (found, k) = locate(src, expected) ?: return emptyList()
+        return found.map { extract(src, it, k) }
     }
 
     /**
      * Emprise sur la vitre (mm depuis le coin repère) des documents détectés sur un scan de [dpi].
      * Vide si la vitre est couverte ou s'il s'agit d'une page de texte (traitée comme A4).
      */
-    fun docExtents(src: Bitmap, dpi: Float): List<RectF> {
-        val (px, d) = small(src, 600)
-        val w = d.first; val h = px.size / w
-        val found = Cv.findDocs(px, w, h)?.takeIf { it.isNotEmpty() } ?: Detect.findDocs(px, w, h)
-        if (found.size == 1 && (found[0].w * found[0].h > w * h * 0.92f || found[0].ink < 0.45f)) return emptyList()
-        val mm = d.second * 25.4f / dpi
+    fun docExtents(src: Bitmap, dpi: Float, expected: Int = 0): List<RectF> {
+        val (found, k) = locate(src, expected) ?: return emptyList()
+        val mm = k * 25.4f / dpi
         return found.map { r ->
-            val a = Math.toRadians(r.angle.toDouble())
-            val c = kotlin.math.abs(kotlin.math.cos(a)).toFloat(); val s = kotlin.math.abs(kotlin.math.sin(a)).toFloat()
-            val hw = (r.w * c + r.h * s) / 2; val hh = (r.w * s + r.h * c) / 2
-            RectF((r.cx - hw) * mm, (r.cy - hh) * mm, (r.cx + hw) * mm, (r.cy + hh) * mm)
+            val c = corners(r)
+            RectF(c.minOf { it.first } * mm, c.minOf { it.second } * mm, c.maxOf { it.first } * mm, c.maxOf { it.second } * mm)
         }
     }
 

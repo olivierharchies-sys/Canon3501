@@ -23,19 +23,30 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.CompletableDeferred
 import android.graphics.Color as AColor
 
-/** Demande de confirmation quand plusieurs documents sont détectés (appel depuis une coroutine). */
+/** Question avec aperçu des documents détectés (appel depuis une coroutine). */
 class SplitAsk {
-    var shown by mutableStateOf<Pair<Bitmap, List<RectF>>?>(null)
+    class Q(val img: Bitmap, val boxes: List<RectF>, val title: String, val text: String, val yes: String, val no: String)
+
+    var shown by mutableStateOf<Q?>(null)
         private set
     private var d: CompletableDeferred<Boolean>? = null
 
-    /** Aperçu + cadres (pixels de l'aperçu). Renvoie true = garder séparés, false = un seul document. */
-    suspend fun ask(img: Bitmap, boxes: List<RectF>): Boolean {
+    /** Aperçu + cadres (pixels de l'aperçu). Renvoie true pour [Q.yes], false pour [Q.no]. */
+    suspend fun ask(q: Q): Boolean {
         val dd = CompletableDeferred<Boolean>()
         d = dd
-        shown = img to boxes
+        shown = q
         return try { dd.await() } finally { shown = null; d = null }
     }
+
+    /** Nombre trouvé inférieur au nombre annoncé : continuer avec ce qui est trouvé ? */
+    suspend fun missing(img: Bitmap, boxes: List<RectF>, expected: Int): Boolean = ask(
+        Q(
+            img, boxes, "${boxes.size} document(s) sur $expected",
+            "Documents trop proches ou trop clairs ? Espacez-les d'au moins 5 mm, ou continuez avec les cadres ci-dessous.",
+            "Continuer", "Annuler",
+        ),
+    )
 
     fun answer(separate: Boolean) { d?.complete(separate) }
 
@@ -46,16 +57,6 @@ class SplitAsk {
             return ext.map { RectF(it.left * k, it.top * k, it.right * k, it.bottom * k) }
         }
 
-        /** Zone commune (fractions 0..1 de l'image) de tous les cadres en mm, marge de 2 mm. */
-        fun union(ext: List<RectF>, dpi: Float, w: Int, h: Int): FloatArray {
-            val k = dpi / 25.4f
-            return floatArrayOf(
-                ((ext.minOf { it.left } - 2f) * k / w).coerceIn(0f, 1f),
-                ((ext.minOf { it.top } - 2f) * k / h).coerceIn(0f, 1f),
-                ((ext.maxOf { it.right } + 2f) * k / w).coerceIn(0f, 1f),
-                ((ext.maxOf { it.bottom } + 2f) * k / h).coerceIn(0f, 1f),
-            )
-        }
     }
 }
 
@@ -78,18 +79,31 @@ private fun annotate(src: Bitmap, boxes: List<RectF>): Bitmap {
 
 @Composable
 fun SplitDialog(a: SplitAsk) {
-    val s = a.shown ?: return
-    val img = remember(s) { annotate(s.first, s.second) }
+    val q = a.shown ?: return
+    val img = remember(q) { annotate(q.img, q.boxes) }
     AlertDialog(
-        onDismissRequest = { a.answer(true) },
-        title = { Text("${s.second.size} documents détectés") },
+        onDismissRequest = { a.answer(false) },
+        title = { Text(q.title) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Un document coupé en morceaux ? Choisissez « Un seul ».")
+                Text(q.text)
                 Image(img.asImageBitmap(), "Documents détectés", Modifier.fillMaxWidth().heightIn(max = 380.dp))
             }
         },
-        confirmButton = { TextButton({ a.answer(true) }) { Text("${s.second.size} séparés") } },
-        dismissButton = { TextButton({ a.answer(false) }) { Text("Un seul") } },
+        confirmButton = { TextButton({ a.answer(true) }) { Text(q.yes) } },
+        dismissButton = { TextButton({ a.answer(false) }) { Text(q.no) } },
     )
+}
+
+/** Nombre de documents posés sur la vitre : Auto (0) ou 1 à 8. */
+@Composable
+fun DocCount(n: Int, onChange: (Int) -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text("Documents sur la vitre", style = androidx.compose.material3.MaterialTheme.typography.labelLarge)
+        Chips((0..8).toList(), n, { if (it == 0) "Auto" else "$it" }, onChange)
+        Text(
+            if (n == 0) "Détection libre." else "Détection guidée : morceaux regroupés si besoin ; aperçu si moins de $n trouvés.",
+            style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+        )
+    }
 }

@@ -263,15 +263,18 @@ object PixmaScan {
             repeat(3) { runCatching { exec(l, GAMMA, gamma()) } }
             exec(l, SCAN_PARAM_3, scanParam(dpi, rawW, lines))
             exec(l, SCAN_START_3)
-            for (i in 0 until 120) {
+            // Attente du chariot : interrogation rapprochée (l'attente fixe faisait perdre jusqu'à 2 s).
+            for (i in 0 until 600) {
                 val st = exec(l, STATUS_3, dataIn = 8)
                 if (st.size > 8 && (st[8].toInt() and 0x03) != 0) break
                 ensureActive()
-                Thread.sleep(1000)
+                Thread.sleep(200)
             }
-            Thread.sleep(1000)
+            // Sortie de veille (scanner occupé au départ) : lampe encore instable, attente plus longue.
+            Thread.sleep(if (tries > 0) 1500L else 300L)
 
             var last = 0
+            var early = 0
             while ((last and 0x28) != 0x28 && y < lines) {
                 ensureActive()
                 val c = ByteArray(16)
@@ -282,6 +285,13 @@ object PixmaScan {
                 while (r.size < 16) r += l.read()
                 val st = u16(r, 0)
                 if (st == BUSY) { Thread.sleep(100); continue }
+                // Tout début : le scanner peut refuser la 1re lecture s'il n'est pas tout à fait prêt.
+                if (st != OK && y == 0 && ++early <= 10) {
+                    // Vide la réponse éventuelle avant de redemander.
+                    var g = r.size - 16; val sz = be32(r, 12)
+                    while (g < sz) { val more = l.readOnce(); if (more.isEmpty()) Thread.sleep(10) else g += more.size }
+                    Thread.sleep(300); continue
+                }
                 if (st != OK) throw IOException("lecture image refusée (état %04x)".format(st))
                 last = r[8].toInt() and 0x38
                 val size = be32(r, 12)
