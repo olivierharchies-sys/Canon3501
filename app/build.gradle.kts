@@ -12,8 +12,8 @@ android {
         applicationId = "be.canonhub"
         minSdk = 29
         targetSdk = 35
-        versionCode = 58
-        versionName = "2.6.0"
+        versionCode = 59
+        versionName = "2.7.0"
         ndk { abiFilters += "arm64-v8a" }
     }
 

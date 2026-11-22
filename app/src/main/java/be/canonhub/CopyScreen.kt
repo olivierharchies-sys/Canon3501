@@ -20,6 +20,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoFixHigh
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Collections
+import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.CreditCard
 import androidx.compose.material.icons.filled.Description
@@ -131,6 +132,9 @@ fun CopyScreen(m: Modifier, prefs: PrinterPrefs, ip: String) {
     var auto by remember { mutableStateOf(prefs.bool("copyAuto", false)) }
     var keep by remember { mutableStateOf(prefs.bool("copyKeep", true)) }
     var count by remember { mutableIntStateOf(prefs.int("copyCount", 0)) }
+    var last by remember { mutableStateOf<List<CopyItem>>(emptyList()) }
+    var saveAsk by remember { mutableStateOf<Classify.Guess?>(null) }
+    var saveType by remember { mutableStateOf(runCatching { OutType.valueOf(prefs.str("copySaveType", "PDF")) }.getOrDefault(OutType.PDF)) }
     var check by remember { mutableStateOf(prefs.bool("copyCheck", false)) }
     val drv = rememberDriver(prefs, route == Route.Driver)
     val splitAsk = remember { SplitAsk() }
@@ -206,19 +210,54 @@ fun CopyScreen(m: Modifier, prefs: PrinterPrefs, ip: String) {
         return "$docs document(s) sur $n feuilles. $r"
     }
 
-    suspend fun add(items: List<CopyItem>, lay: PageLayout = layout): String = when {
-        batch -> {
-            queue = queue + items; sel = queue.size - 1
-            "Ajouté au lot (${queue.size}). Posez le document suivant."
+    suspend fun add(items: List<CopyItem>, lay: PageLayout = layout): String {
+        last = items
+        return when {
+            batch -> {
+                queue = queue + items; sel = queue.size - 1
+                "Ajouté au lot (${queue.size}). Posez le document suivant."
+            }
+            preview -> {
+                queue = items; sel = 0
+                "Aperçu prêt : choisissez la zone si besoin, puis « Imprimer »."
+            }
+            else -> printAll(items, lay)
         }
-        preview -> {
-            queue = items; sel = 0
-            "Aperçu prêt : choisissez la zone si besoin, puis « Imprimer »."
-        }
-        else -> printAll(items, lay)
     }
 
     suspend fun add(item: CopyItem): String = add(listOf(item))
+
+    /** Documents de la dernière copie (ou du lot) : ce que « Enregistrer » écrit. */
+    fun savable() = queue.ifEmpty { last }
+
+    /** Image d'un document telle que copiée (rotation, zone, corrections, filtre). */
+    fun docBitmap(it: CopyItem): Bitmap {
+        val p = it.page
+        var b = Images.decode(p.bytes, 3508)?.let { d -> Images.cropArea(Images.rotate(d, p.rot), p.crop) } ?: throw IOException("image illisible")
+        if (!it.sheet) {
+            if (straight) b = Images.straighten(b)
+            b = Images.applyFilter(Images.fix(b, corr), filt)
+        }
+        return b
+    }
+
+    /** dpi réel d'un document après décodage (taille réelle dans le PDF). */
+    fun docDpi(it: CopyItem): Int {
+        val o = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        android.graphics.BitmapFactory.decodeByteArray(it.page.bytes, 0, it.page.bytes.size, o)
+        return (it.page.dpi / Images.sampleFor(o.outWidth, o.outHeight, 3508)).coerceAtLeast(1)
+    }
+
+    fun askSave() {
+        if (prefs.autoClass) scope.launch {
+            busy = true; msg = "Analyse du document…"
+            saveAsk = try {
+                val b = withContext(Dispatchers.Default) { docBitmap(savable()[0]) }
+                Classify.guess(runCatching { Ocr.read(b).text }.getOrDefault(""))
+            } catch (e: Exception) { Classify.Guess(DocType.Other, null, null) }
+            busy = false; msg = ""
+        } else saveAsk = Classify.Guess(DocType.Other, null, null)
+    }
 
     /**
      * Détection automatique en un seul passage : vitre entière numérisée, documents détectés
@@ -290,6 +329,22 @@ fun CopyScreen(m: Modifier, prefs: PrinterPrefs, ip: String) {
         }
     }
 
+    saveAsk?.let { g ->
+        SaveDocDialog(g, saveType, onDismiss = { saveAsk = null }) { t, dt, name ->
+            saveAsk = null
+            saveType = t; prefs.setStr("copySaveType", t.name)
+            val items = savable()
+            scope.launch {
+                busy = true; msg = "Enregistrement…"
+                msg = try {
+                    val n = SaveDoc.write(ctx, t, dt?.folder, name, 90, items.map { docDpi(it) }) { k -> docBitmap(items[k]) }.size
+                    (if (dt != null) "Classé dans ${dt.label} : $name" else "Enregistré : $name") + if (n > 1) " ($n fichiers)" else ""
+                } catch (e: Exception) { "Échec : ${e.message}" }
+                busy = false
+            }
+        }
+    }
+
     ActionScreen(m, bottom = {
         StatusMsg(msg, busy)
         if ((batch || preview) && queue.isNotEmpty()) {
@@ -298,7 +353,7 @@ fun CopyScreen(m: Modifier, prefs: PrinterPrefs, ip: String) {
                     busy = true; msg = "Mise en page…"
                     msg = try {
                         val r = printAll(queue)
-                        queue = emptyList(); sel = 0
+                        last = queue; queue = emptyList(); sel = 0
                         r
                     } catch (e: Exception) { "Échec : ${e.message}" }
                     busy = false
@@ -315,6 +370,12 @@ fun CopyScreen(m: Modifier, prefs: PrinterPrefs, ip: String) {
             },
             Icons.Filled.ContentCopy, Brand.Copy, busy = busy,
         ) { scanNow() }
+        if (savable().isNotEmpty() && !busy) {
+            OutlinedButton(modifier = Modifier.fillMaxWidth(), onClick = { askSave() }) {
+                Icon(Icons.Filled.Save, null)
+                Text("  Enregistrer la copie (${savable().size} doc.)")
+            }
+        }
     }) {
         Hero(
             "Copier",
@@ -323,7 +384,7 @@ fun CopyScreen(m: Modifier, prefs: PrinterPrefs, ip: String) {
         )
 
         Section("Que copiez-vous ?", Icons.Filled.Layers, accent = Brand.Copy[1]) {
-            Switcher("Détection automatique", auto, "Prénumérisation rapide : taille et nombre de documents détectés, une image par document.") {
+            Switcher("Détection automatique", auto, "Vitre numérisée puis analysée : taille et nombre de documents détectés, une image par document.") {
                 auto = it; prefs.setBool("copyAuto", it)
                 if (it) { area = Area.A4; front = null }
             }

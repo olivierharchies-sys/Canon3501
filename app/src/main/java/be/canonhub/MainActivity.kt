@@ -20,6 +20,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.background
 import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Refresh
@@ -681,6 +682,12 @@ fun ScanScreen(m: Modifier, ip: String) {
         return Classify.guess(txt)
     }
 
+    /** Fenêtre d'enregistrement : type de document proposé par l'OCR si le classement auto est actif. */
+    fun askSave() {
+        if (prefs0.autoClass) work("Analyse du document…") { plan = SavePlan(analyze()); "" }
+        else plan = SavePlan(Classify.Guess(DocType.Other, null, null))
+    }
+
     Column(m.padding(16.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Hero(
             "Numériser",
@@ -727,6 +734,17 @@ fun ScanScreen(m: Modifier, ip: String) {
                 pages = pages + pg
                 sel = pages.size - 1
                 "${pages.size} page(s) numérisée(s)."
+            }
+        }
+        // Accès direct à l'enregistrement (sans descendre jusqu'aux réglages).
+        if (pages.isNotEmpty() && !busy) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(modifier = Modifier.weight(1f), onClick = { askSave() }) {
+                    Icon(Icons.Filled.Save, null); Text("  Enregistrer (${type.label})")
+                }
+                OutlinedButton(modifier = Modifier.weight(1f), onClick = {
+                    work("Préparation…") { Output.shareAll(ctx, saveAll(), type.mime); "" }
+                }) { Text("Partager") }
             }
         }
         if (busy) {
@@ -853,10 +871,7 @@ fun ScanScreen(m: Modifier, ip: String) {
                     color = MaterialTheme.colorScheme.primary,
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(enabled = !busy, modifier = Modifier.weight(1f), onClick = {
-                        if (prefs0.autoClass) work("Analyse du document…") { plan = SavePlan(analyze()); "" }
-                        else work(if (ocrPdf && type == OutType.PDF) "Création du PDF (OCR)…" else "Enregistrement…") { savedMsg(saveAll().size) }
-                    }) { Text("Enregistrer") }
+                    Button(enabled = !busy, modifier = Modifier.weight(1f), onClick = { askSave() }) { Text("Enregistrer") }
                     OutlinedButton(enabled = !busy, modifier = Modifier.weight(1f), onClick = {
                         work("Préparation…") { Output.shareAll(ctx, saveAll(), type.mime); "" }
                     }) { Text("Partager") }
@@ -891,43 +906,14 @@ fun ScanScreen(m: Modifier, ip: String) {
             } ?: run { cropIdx = null }
         }
         plan?.let { pl ->
-            var dt by remember(pl) { mutableStateOf(pl.guess.type) }
-            var name by remember(pl) { mutableStateOf(pl.guess.name()) }
-            androidx.compose.material3.AlertDialog(
-                onDismissRequest = { plan = null },
-                title = { Text("Classer le document") },
-                text = {
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Hint("Type détecté sur le téléphone (aucun envoi en ligne). Modifiable.")
-                        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            DocType.entries.forEach { d ->
-                                FilterChip(selected = dt == d, onClick = { dt = d; name = pl.guess.name(d) }, label = { Text(d.label) })
-                            }
-                        }
-                        androidx.compose.material3.OutlinedTextField(
-                            name, { name = it }, singleLine = true, modifier = Modifier.fillMaxWidth(),
-                            label = { Text("Nom du fichier") },
-                        )
-                        Hint("Dossier : ${if (type == OutType.PDF || type == OutType.TIFF) "Téléchargements" else "Images"}/Canon/${dt.folder}")
-                    }
-                },
-                confirmButton = {
-                    androidx.compose.material3.TextButton(onClick = {
-                        val f = dt.folder; val n = Classify.clean(name); val lbl = dt.label
-                        plan = null
-                        work("Enregistrement…") {
-                            saveAll(f, n)
-                            "Classé dans $lbl : $n"
-                        }
-                    }) { Text("Enregistrer") }
-                },
-                dismissButton = {
-                    androidx.compose.material3.TextButton(onClick = {
-                        plan = null
-                        work("Enregistrement…") { savedMsg(saveAll().size) }
-                    }) { Text("Sans classer") }
-                },
-            )
+            SaveDocDialog(pl.guess, type, onDismiss = { plan = null }) { t, dt, n ->
+                plan = null
+                type = t; prefs0.setStr("scanType", t.name)
+                work(if (ocrPdf && t == OutType.PDF) "Création du PDF (OCR)…" else "Enregistrement…") {
+                    val c = saveAll(dt?.folder, n).size
+                    if (dt != null) "Classé dans ${dt.label} : $n" + (if (c > 1) " ($c fichiers)" else "") else savedMsg(c)
+                }
+            }
         }
         if (askInterleave) {
             androidx.compose.material3.AlertDialog(
