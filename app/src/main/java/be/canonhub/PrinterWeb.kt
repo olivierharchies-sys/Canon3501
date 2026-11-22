@@ -38,6 +38,7 @@ fun PrinterWebSettings(ip: String, prefs: PrinterPrefs) {
     val scope = rememberCoroutineScope()
     var v by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
     var busy by remember { mutableStateOf(false) }
+    KeepAwake(busy)
     var msg by remember { mutableStateOf("") }
     var askInk by remember { mutableStateOf<String?>(null) }
     val pwd = prefs.ruiPassword
@@ -118,6 +119,7 @@ fun PrinterWebInfo(ip: String, prefs: PrinterPrefs) {
     val scope = rememberCoroutineScope()
     var rows by remember { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
     var busy by remember { mutableStateOf(false) }
+    KeepAwake(busy)
     var msg by remember { mutableStateOf("") }
     val pwd = prefs.ruiPassword
 

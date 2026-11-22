@@ -489,6 +489,7 @@ fun CalibScreen(m: Modifier, ip: String) {
     val scope = rememberCoroutineScope()
     var st by remember { mutableStateOf(Calib.state) }
     var busy by remember { mutableStateOf(false) }
+    KeepAwake(busy)
     var msg by remember { mutableStateOf("") }
     var report by remember { mutableStateOf<Calib.Report?>(null) }
     var sx by remember { mutableFloatStateOf(st.scaleX) }

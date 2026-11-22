@@ -93,6 +93,7 @@ fun CalibWizard(ip: String, prefs: PrinterPrefs, onClose: () -> Unit) {
     var mmV by remember { mutableStateOf("") }
     val log = remember { mutableStateListOf<String>() }
     val busy = ph == Ph.Run
+    KeepAwake(ph == Ph.Run || ph == Ph.Dry)
     val ok = ip.isNotBlank() && Gutenprint.available
 
     fun go(s: W) { step = s; ph = Ph.Idle; msg = ""; notes = emptyList(); tick++ }

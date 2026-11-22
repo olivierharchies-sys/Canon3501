@@ -137,7 +137,7 @@ fun sharedUri(i: Intent): Uri? = when (i.action) {
 
 @Composable
 fun App(prefs: PrinterPrefs, incoming: Intent?, consumed: () -> Unit) {
-    var screen by remember { mutableStateOf(Screen.Home) }
+    var screen by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(Screen.Home) }
     var ip by remember { mutableStateOf(prefs.ip) }
     var shared by remember { mutableStateOf<Uri?>(null) }
     BackHandler(enabled = screen != Screen.Home) { screen = if (screen == Screen.Calib || screen == Screen.GpTune) Screen.Settings else Screen.Home }
@@ -460,6 +460,7 @@ fun ScanScreen(m: Modifier, ip: String) {
     var bright by remember { mutableFloatStateOf(0f) }
     var contrast by remember { mutableFloatStateOf(1f) }
     var busy by remember { mutableStateOf(false) }
+    KeepAwake(busy)
     var msg by remember { mutableStateOf("") }
     var pages by remember { mutableStateOf<List<Page>>(emptyList()) }
     var sel by remember { mutableIntStateOf(0) }

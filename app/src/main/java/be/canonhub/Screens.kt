@@ -200,6 +200,8 @@ fun MaintenanceScreen(m: Modifier, prefs: PrinterPrefs, ip: String, go: (Screen)
     val log = remember { ToolLog(ctx) }
     var transport by remember { mutableStateOf(log.transport) }
     var busy by remember { mutableStateOf<Tool?>(null) }
+    var following by remember { mutableStateOf(false) }
+    KeepAwake(busy != null || following)
     var msg by remember { mutableStateOf("") }
     var confirm by remember { mutableStateOf<Tool?>(null) }
     var refresh by remember { mutableIntStateOf(0) }
@@ -244,8 +246,11 @@ fun MaintenanceScreen(m: Modifier, prefs: PrinterPrefs, ip: String, go: (Screen)
             if (ok) {
                 val before = base?.let { Bjnp.readable(it) }
                 raw = before?.let { "avant : $it" } ?: ""
+                following = true
                 watchJob = scope.launch {
-                    ToolWatch.follow(ip, base) { s, r -> watch = s; if (r.isNotEmpty()) raw = (before?.let { "avant : $it\n" } ?: "") + "actuel : $r" }
+                    try {
+                        ToolWatch.follow(ip, base) { s, r -> watch = s; if (r.isNotEmpty()) raw = (before?.let { "avant : $it\n" } ?: "") + "actuel : $r" }
+                    } finally { following = false }
                 }
             }
         }
@@ -369,6 +374,7 @@ fun QueueScreen(m: Modifier, ip: String) {
     val scope = rememberCoroutineScope()
     var sysJobs by remember { mutableStateOf(PrintQueue.pending(ctx)) }
     var clearing by remember { mutableStateOf(false) }
+    KeepAwake(clearing)
     var done by remember { mutableStateOf(false) }
     var jobs by remember { mutableStateOf<List<Ipp.Job>>(emptyList()) }
     var loading by remember { mutableStateOf(false) }
@@ -547,6 +553,7 @@ fun SettingsScreen(m: Modifier, prefs: PrinterPrefs, ip: String, onSave: (String
     var name by remember { mutableStateOf("") }
     var msg by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
+    KeepAwake(busy)
     var searching by remember { mutableStateOf(false) }
     var found by remember { mutableStateOf<List<Discovery.Found>>(emptyList()) }
     var profiles by remember { mutableStateOf(prefs.profiles) }

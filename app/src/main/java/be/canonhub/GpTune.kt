@@ -47,6 +47,7 @@ fun GpTuneScreen(m: Modifier, prefs: PrinterPrefs, ip: String) {
     var imgTypes by remember { mutableStateOf<List<Gutenprint.Choice>>(emptyList()) }
     var dithers by remember { mutableStateOf<List<Gutenprint.Choice>>(emptyList()) }
     var busy by remember { mutableStateOf(false) }
+    KeepAwake(busy)
     var msg by remember { mutableStateOf("") }
     var askReset by remember { mutableStateOf(false) }
     var proposal by remember { mutableStateOf<Pair<Gutenprint.Tune, List<String>>?>(null) }

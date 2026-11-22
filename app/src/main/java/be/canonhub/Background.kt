@@ -209,11 +209,11 @@ class ScanService : android.app.Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val nm = getSystemService(NotificationManager::class.java)
-        nm.createNotificationChannel(NotificationChannel(CH, "Numérisation", NotificationManager.IMPORTANCE_LOW))
+        nm.createNotificationChannel(NotificationChannel(CH, "Traitement en cours", NotificationManager.IMPORTANCE_LOW))
         val n = NotificationCompat.Builder(this, CH)
             .setSmallIcon(android.R.drawable.ic_menu_upload)
-            .setContentTitle("Numérisation en cours")
-            .setContentText("Vous pouvez changer d'appli.")
+            .setContentTitle("Traitement en cours")
+            .setContentText("Vous pouvez verrouiller l'écran ou changer d'appli.")
             .setOngoing(true)
             .setContentIntent(Notif.openApp(this, Screen.Scan, 9))
             .build()
@@ -227,7 +227,7 @@ class ScanService : android.app.Service() {
         if (wake == null) {
             wake = getSystemService(android.os.PowerManager::class.java)
                 .newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "canonhub:scan")
-                .apply { acquire(10 * 60 * 1000L) }
+                .apply { acquire(30 * 60 * 1000L) }
             @Suppress("DEPRECATION")
             wifi = applicationContext.getSystemService(android.net.wifi.WifiManager::class.java)
                 .createWifiLock(android.net.wifi.WifiManager.WIFI_MODE_FULL_HIGH_PERF, "canonhub:scan")
@@ -246,18 +246,39 @@ class ScanService : android.app.Service() {
         private const val CH = "scan"
         private const val ID = 7
 
+        private val users = java.util.concurrent.atomic.AtomicInteger()
+        @Volatile private var t0 = 0L
+        private val main = android.os.Handler(android.os.Looper.getMainLooper())
+
+        fun active() = users.get() > 0
+
+        /** Démarre (ou partage) le service. Compté : chaque hold() exige un release(). */
+        fun hold(ctx: Context) {
+            val app = ctx.applicationContext
+            if (users.getAndIncrement() == 0) {
+                t0 = System.currentTimeMillis()
+                runCatching { ContextCompat.startForegroundService(app, Intent(app, ScanService::class.java)) }
+            }
+        }
+
+        /** Arrête le service quand plus personne ne le tient (délai mini 1,5 s, sinon plantage Android). */
+        fun release(ctx: Context) {
+            val app = ctx.applicationContext
+            if (users.decrementAndGet() > 0) return
+            users.set(0)
+            val wait = (1500 - (System.currentTimeMillis() - t0)).coerceAtLeast(0)
+            main.postDelayed({
+                if (users.get() == 0) runCatching { app.stopService(Intent(app, ScanService::class.java)) }
+            }, wait)
+        }
+
         /** Exécute [block] en gardant l'appli active (service au premier plan). */
         suspend fun <T> keep(ctx: Context, block: suspend () -> T): T {
-            val i = Intent(ctx, ScanService::class.java)
-            val t0 = System.currentTimeMillis()
-            runCatching { ContextCompat.startForegroundService(ctx, i) }
+            hold(ctx)
             try {
                 return block()
             } finally {
-                // Laisse au service le temps de passer au premier plan avant l'arrêt (sinon plantage Android).
-                val dt = System.currentTimeMillis() - t0
-                if (dt < 1500) kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { kotlinx.coroutines.delay(1500 - dt) }
-                runCatching { ctx.stopService(i) }
+                release(ctx)
             }
         }
     }

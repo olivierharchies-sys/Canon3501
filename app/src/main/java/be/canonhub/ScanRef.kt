@@ -169,6 +169,7 @@ fun ScanRefSection(ip: String, onDone: (String) -> Unit = {}) {
     var img by remember { mutableStateOf<Bitmap?>(null) }
     var rect by remember { mutableStateOf(floatArrayOf(0.05f, 0.05f, 0.95f, 0.15f)) }
     var busy by remember { mutableStateOf(false) }
+    KeepAwake(busy)
     var msg by remember { mutableStateOf("") }
     var on by remember { mutableStateOf(ScanRef.on) }
 

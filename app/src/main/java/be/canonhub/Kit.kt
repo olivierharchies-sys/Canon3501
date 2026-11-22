@@ -425,9 +425,26 @@ fun ActionScreen(m: Modifier, bottom: @Composable ColumnScope.() -> Unit, conten
     }
 }
 
+/**
+ * Pendant un traitement : écran allumé + service au premier plan (réseau, processeur).
+ * Compté : plusieurs appels simultanés partagent le même service.
+ */
+@Composable
+fun KeepAwake(on: Boolean) {
+    if (!on) return
+    val view = androidx.compose.ui.platform.LocalView.current
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        view.keepScreenOn = true
+        ScanService.hold(ctx)
+        onDispose { ScanService.release(ctx); view.keepScreenOn = ScanService.active() }
+    }
+}
+
 /** Message d'état : progression et texte copiable. */
 @Composable
 fun StatusMsg(msg: String, busy: Boolean) {
+    KeepAwake(busy)
     if (busy) LinearProgressIndicator(Modifier.fillMaxWidth().clip(CircleShape))
     if (msg.isNotEmpty()) {
         val clip = LocalClipboardManager.current
