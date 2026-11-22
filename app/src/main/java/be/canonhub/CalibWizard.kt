@@ -1,10 +1,12 @@
 package be.canonhub
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -33,6 +35,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -210,7 +213,22 @@ fun CalibWizard(ip: String, prefs: PrinterPrefs, onClose: () -> Unit) {
                                 Gutenprint.saveTune(ctx, tuneBefore); log += "${step.title} : annulé."; next()
                             }, Modifier.fillMaxWidth()) { Text("Annuler ces réglages et continuer") }
                         }
-                        if (ph == Ph.Idle) OutlinedButton(onClick = { printChart() }, Modifier.fillMaxWidth()) { Text("Réimprimer la mire") }
+                        if (ph == Ph.Idle) {
+                            // Échec d'analyse : aperçu du scan et reprises possibles.
+                            Calib.lastScan?.takeIf { msg.startsWith("Échec") && "repères" in msg }?.let { b ->
+                                Text("Image numérisée :", style = MaterialTheme.typography.labelLarge)
+                                Image(b.asImageBitmap(), null, Modifier.fillMaxWidth().aspectRatio(b.width.toFloat() / b.height))
+                            }
+                            OutlinedButton(onClick = { ph = Ph.Place; msg = "" }, Modifier.fillMaxWidth()) { Text("Repositionner et numériser à nouveau") }
+                            if (Calib.lastDark > 80 && "repères" in msg) Button(onClick = {
+                                val t = Gutenprint.tune(ctx)
+                                val d = (t.density * 1.25f).coerceAtMost(1.5f)
+                                Gutenprint.saveTune(ctx, t.copy(density = d))
+                                log += "Impression pâle : densité portée à ${"%.2f".format(d)}."
+                                printChart()
+                            }, Modifier.fillMaxWidth()) { Text("Impression pâle : réimprimer plus foncé") }
+                            OutlinedButton(onClick = { printChart() }, Modifier.fillMaxWidth()) { Text("Réimprimer la mire") }
+                        }
                     }
 
                     W.Visual -> VisualCheck(enabled = !busy, onPrint = { printChart() }, onAdjust = { log += it; msg = it })

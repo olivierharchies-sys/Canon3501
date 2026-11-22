@@ -356,20 +356,53 @@ object Calib {
         return intArrayOf((sr / n).toInt(), (sg / n).toInt(), (sb / n).toInt())
     }
 
-    /** Repères noirs de 8 mm : composantes sombres compactes, de taille attendue. */
+    /** Diagnostic de la dernière détection : noir le plus sombre et blanc du papier (0–255). */
+    @Volatile var lastDark = 0
+        private set
+    @Volatile var lastWhite = 0
+        private set
+    /** Dernière mire numérisée (réduite), pour l'afficher en cas d'échec. */
+    @Volatile var lastScan: Bitmap? = null
+        private set
+
+    /**
+     * Repères noirs de 8 mm : composantes sombres compactes, de taille attendue.
+     * Seuil adaptatif (entre le noir le plus sombre et le blanc du papier) : tolère une impression pâle.
+     */
     private fun markers(b: Bitmap, dpi: Float): List<Pair<Float, Float>> {
         val sw = 600
         val k = b.width.toFloat() / sw
         val sh = (b.height / k).toInt()
         val small = Bitmap.createScaledBitmap(b, sw, sh, true)
+        lastScan = small
         val px = IntArray(sw * sh)
         small.getPixels(px, 0, sw, 0, 0, sw, sh)
-        val dark = BooleanArray(px.size) { val c = px[it]; (AColor.red(c) + AColor.green(c) + AColor.blue(c)) / 3 < 90 }
+        val lum = IntArray(px.size) { val c = px[it]; (AColor.red(c) * 30 + AColor.green(c) * 59 + AColor.blue(c) * 11) / 100 }
+        val hist = IntArray(256).also { h -> lum.forEach { h[it]++ } }
+        fun pct(q: Float): Int {
+            var acc = 0; val lim = (lum.size * q).toInt()
+            for (v in 0..255) { acc += hist[v]; if (acc >= lim) return v }
+            return 255
+        }
+        val black = pct(0.002f); val white = pct(0.6f)
+        lastDark = black; lastWhite = white
         val exp = 8f / 25.4f * dpi / k
-        val seen = BooleanArray(px.size)
-        val stack = IntArray(px.size)
+        var best = emptyList<Pair<Float, Float>>()
+        // Seuil fixe d'abord, puis de plus en plus tolérant.
+        for (th in listOf(90, black + (white - black) * 4 / 10, black + (white - black) * 6 / 10).distinct()) {
+            val f = blobs(lum, sw, sh, th, exp, k)
+            if (f.size >= 4) return f
+            if (f.size > best.size) best = f
+        }
+        return best
+    }
+
+    private fun blobs(lum: IntArray, sw: Int, sh: Int, th: Int, exp: Float, k: Float): List<Pair<Float, Float>> {
+        val dark = BooleanArray(lum.size) { lum[it] < th }
+        val seen = BooleanArray(lum.size)
+        val stack = IntArray(lum.size)
         val found = ArrayList<Pair<Float, Float>>()
-        for (s0 in px.indices) {
+        for (s0 in lum.indices) {
             if (!dark[s0] || seen[s0]) continue
             var top = 0; stack[top++] = s0; seen[s0] = true
             var l = sw; var t = sh; var r = -1; var bo = -1; var n = 0; var sx = 0L; var sy = 0L
@@ -379,14 +412,15 @@ object Calib {
                 sx += x; sy += y
                 if (x < l) l = x; if (x > r) r = x; if (y < t) t = y; if (y > bo) bo = y
                 for (j in intArrayOf(i - 1, i + 1, i - sw, i + sw)) {
-                    if (j < 0 || j >= px.size || seen[j] || !dark[j]) continue
+                    if (j < 0 || j >= lum.size || seen[j] || !dark[j]) continue
                     if ((j == i - 1 && x == 0) || (j == i + 1 && x == sw - 1)) continue
                     seen[j] = true; stack[top++] = j
                 }
             }
             val bw = r - l + 1f; val bh = bo - t + 1f
-            val ok = bw in exp * 0.6f..exp * 1.3f && bh in exp * 0.6f..exp * 1.3f &&
-                n / (bw * bh) > 0.7f && bw / bh in 0.7f..1.4f
+            // Tolérance : tramage visible et léger écart d'échelle.
+            val ok = bw in exp * 0.6f..exp * 1.35f && bh in exp * 0.6f..exp * 1.35f &&
+                n / (bw * bh) > 0.6f && bw / bh in 0.7f..1.4f
             if (ok) found += ((sx.toFloat() / n + 0.5f) * k) to ((sy.toFloat() / n + 0.5f) * k)
         }
         return found
@@ -394,7 +428,11 @@ object Calib {
 
     fun analyze(b: Bitmap, dpi: Float): Report {
         val m = markers(b, dpi)
-        if (m.size < 4) throw IOException("repères introuvables (${m.size}/4) : mire bien à plat, face contre la vitre ?")
+        if (m.size < 4) throw IOException(
+            "repères introuvables (${m.size}/4). Noir le plus sombre lu : $lastDark (attendu < 60), papier : $lastWhite. " +
+                if (lastDark > 80) "Impression trop pâle : vérifiez encre et buses, ou augmentez la densité du pilote."
+                else "Mire bien à plat, face contre la vitre, les 4 carrés noirs visibles ?",
+        )
         var tl = m.minBy { it.first + it.second }; var br = m.maxBy { it.first + it.second }
         var tr = m.maxBy { it.first - it.second }; var bl = m.minBy { it.first - it.second }
 
