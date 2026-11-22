@@ -407,6 +407,9 @@ fun CalibScreen(m: Modifier, ip: String) {
     var report by remember { mutableStateOf<Calib.Report?>(null) }
     var sx by remember { mutableFloatStateOf(st.scaleX) }
     var sy by remember { mutableFloatStateOf(st.scaleY) }
+    val prefs = remember { PrinterPrefs(ctx) }
+    // Mire imprimée par le pilote : son échelle relève de « Réglage du pilote », pas de la fenêtre Android.
+    var viaDriver by remember { mutableStateOf(Gutenprint.available && ip.isNotBlank()) }
 
     var askReset by remember { mutableStateOf(false) }
     if (askReset) {
@@ -432,13 +435,33 @@ fun CalibScreen(m: Modifier, ip: String) {
         }
         Section("1. Imprimer la mire", Icons.Filled.Print, sub = "Papier A4 blanc ordinaire") {
             Button(enabled = !busy, modifier = Modifier.fillMaxWidth(), onClick = {
-                val keep = Calib.state
-                // Mire imprimée sans correction d'échelle, pour mesurer la machine telle quelle.
-                Calib.save(ctx, keep.copy(printOn = false))
-                printBitmap(ctx, "mire", Calib.chart())
-                Calib.save(ctx, keep)
+                if (Gutenprint.available && ip.isNotBlank()) {
+                    // Pilote intégré (BJNP), comme les impressions et copies : la mire mesure ce rendu.
+                    busy = true; msg = ""
+                    scope.launch {
+                        msg = try {
+                            PrintQueue.cancelAndroid(ctx)
+                            Gutenprint.testPage(ctx, ip, prefs.gpSel, 300) { msg = it }.also { viaDriver = true }
+                        } catch (e: Exception) { "Échec du pilote : ${e.message}" }
+                        busy = false
+                    }
+                } else {
+                    val keep = Calib.state
+                    // Mire imprimée sans correction d'échelle, pour mesurer la machine telle quelle.
+                    Calib.save(ctx, keep.copy(printOn = false))
+                    printBitmap(ctx, "mire", Calib.chart())
+                    Calib.save(ctx, keep)
+                    viaDriver = false
+                }
             }) { Text("Imprimer la mire") }
-            Hint("Dans la fenêtre Android : A4, 100 %, qualité standard.")
+            Hint(
+                if (Gutenprint.available) "Pilote intégré, taille réelle. Faites d'abord « Réglage du pilote » (échelle, couleurs)."
+                else "Dans la fenêtre Android : A4, 100 %, qualité standard.",
+            )
+            OutlinedButton(enabled = !busy, modifier = Modifier.fillMaxWidth(), onClick = {
+                busy = true
+                scope.launch { msg = PrintQueue.clearAll(ctx, ip, prefs.ruiPassword); busy = false }
+            }) { Text("Vider la file d'impression") }
         }
         Section("2. Numériser et analyser", Icons.Filled.DocumentScanner, sub = "Mire face contre la vitre") {
             Button(enabled = !busy && ip.isNotBlank(), modifier = Modifier.fillMaxWidth(), onClick = {
@@ -497,14 +520,17 @@ fun CalibScreen(m: Modifier, ip: String) {
                 }
                 r.warnings.forEach { Pill(it, MaterialTheme.colorScheme.error) }
                 Button(modifier = Modifier.fillMaxWidth(), onClick = {
+                    val old = Calib.state
                     commit(
                         Calib.State(
-                            r.scaleX, r.scaleY, r.gains, r.curve,
-                            printOn = true, scanOn = true, copyOn = true, date = System.currentTimeMillis(),
-                            matrix = r.matrix, colorOn = true,
+                            if (viaDriver) old.scaleX else r.scaleX, if (viaDriver) old.scaleY else r.scaleY,
+                            r.gains, r.curve,
+                            printOn = if (viaDriver) old.printOn else true, scanOn = true, copyOn = true,
+                            date = System.currentTimeMillis(), matrix = r.matrix, colorOn = true,
                         ),
                     )
-                    report = null; msg = "Étalonnage appliqué."
+                    report = null
+                    msg = if (viaDriver) "Étalonnage appliqué (échelle : voir Réglage du pilote)." else "Étalonnage appliqué."
                 }) { Text("Appliquer les corrections") }
             }
         }

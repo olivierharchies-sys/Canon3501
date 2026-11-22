@@ -364,7 +364,11 @@ fun MaintenanceScreen(m: Modifier, prefs: PrinterPrefs, ip: String, go: (Screen)
 
 @Composable
 fun QueueScreen(m: Modifier, ip: String) {
+    val ctx = LocalContext.current
+    val prefs = remember { PrinterPrefs(ctx) }
     val scope = rememberCoroutineScope()
+    var sysJobs by remember { mutableStateOf(PrintQueue.pending(ctx)) }
+    var clearing by remember { mutableStateOf(false) }
     var done by remember { mutableStateOf(false) }
     var jobs by remember { mutableStateOf<List<Ipp.Job>>(emptyList()) }
     var loading by remember { mutableStateOf(false) }
@@ -374,6 +378,7 @@ fun QueueScreen(m: Modifier, ip: String) {
     fun load() {
         scope.launch {
             loading = true
+            sysJobs = PrintQueue.pending(ctx)
             msg = try {
                 jobs = Ipp.jobs(ip, done)
                 lpd = null
@@ -400,6 +405,22 @@ fun QueueScreen(m: Modifier, ip: String) {
                 FilterChip(selected = done, onClick = { done = true }, label = { Text("Terminées") })
             }
         }
+        Button(
+            enabled = !clearing, modifier = Modifier.fillMaxWidth(),
+            colors = androidx.compose.material3.ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+            onClick = {
+                clearing = true; msg = "Vidage de la file…"
+                scope.launch { msg = PrintQueue.clearAll(ctx, ip, prefs.ruiPassword); clearing = false; load() }
+            },
+        ) { Text("Vider la file d'impression") }
+        if (clearing) LinearProgressIndicator(Modifier.fillMaxWidth())
+        if (sysJobs.isNotEmpty()) ElevatedCard(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("Bloquées dans Android (service d'impression)", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                sysJobs.forEach { Text("• $it", style = MaterialTheme.typography.bodyMedium) }
+            }
+        }
+        TextButton(onClick = { PrintQueue.openSettings(ctx) }) { Text("Tâches d'autres applis : réglages d'impression Android") }
         if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
         if (msg.isNotEmpty()) Text(msg)
         lpd?.let { st ->
