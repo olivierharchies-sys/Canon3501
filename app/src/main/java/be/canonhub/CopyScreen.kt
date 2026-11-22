@@ -131,6 +131,7 @@ fun CopyScreen(m: Modifier, prefs: PrinterPrefs, ip: String) {
     var auto by remember { mutableStateOf(prefs.bool("copyAuto", false)) }
     var keep by remember { mutableStateOf(prefs.bool("copyKeep", true)) }
     var count by remember { mutableIntStateOf(prefs.int("copyCount", 0)) }
+    var check by remember { mutableStateOf(prefs.bool("copyCheck", false)) }
     val drv = rememberDriver(prefs, route == Route.Driver)
     val splitAsk = remember { SplitAsk() }
     SplitDialog(splitAsk)
@@ -247,18 +248,9 @@ fun CopyScreen(m: Modifier, prefs: PrinterPrefs, ip: String) {
             val img = Images.decode(b, 4000) ?: throw IOException("image illisible")
             img to (dpi * img.width / (zone.w * dpi / 300).coerceAtLeast(1)).coerceAtLeast(1)
         }
-        val found = withContext(Dispatchers.Default) { Images.documents(img, count) }
-        // Nombre annoncé non atteint : aperçu, l'utilisateur continue ou repositionne.
-        if (count > 1 && found.size < count) {
-            val (pv, ext) = withContext(Dispatchers.Default) {
-                val k = 1000f / maxOf(img.width, img.height)
-                val pv = if (k < 1f) Bitmap.createScaledBitmap(img, (img.width * k).toInt(), (img.height * k).toInt(), true) else img
-                pv to Images.docExtents(img, d.toFloat(), count)
-            }
-            if (!splitAsk.missing(pv, SplitAsk.toPx(ext, d * pv.width.toFloat() / img.width), count)) {
-                return "Annulé : espacez les documents puis relancez."
-            }
-        }
+        val found0 = withContext(Dispatchers.Default) { Images.documents(img, count) }
+        // Cadres à ajuster si moins de documents que prévu (ou toujours, si demandé).
+        val found = splitAsk.review(img, d, count, found0, check) ?: return "Annulé : espacez les documents puis relancez."
         val docs = withContext(Dispatchers.Default) { found.map { Page(Images.jpeg(it, 92), d) } }
         msg = "Mise en page…"
         val r = if (docs.isEmpty()) add(CopyItem(Page(b, dpi)))
@@ -338,7 +330,7 @@ fun CopyScreen(m: Modifier, prefs: PrinterPrefs, ip: String) {
             // Détection automatique : format et nombre de documents imposés par la prénumérisation.
             if (auto) {
                 Hint("Format et nombre de documents détectés. Carte recto/verso : désactivez la détection.")
-                DocCount(count) { count = it; prefs.setInt("copyCount", it) }
+                DocCount(count, check, { check = it; prefs.setBool("copyCheck", it) }) { count = it; prefs.setInt("copyCount", it) }
             }
             else {
                 ChoiceGrid(Area.entries, area, 2, ::areaLabel, ::areaSub, ::areaIcon, accent = Brand.Copy[1]) { area = it; front = null }

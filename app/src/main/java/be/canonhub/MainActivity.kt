@@ -447,6 +447,7 @@ fun ScanScreen(m: Modifier, ip: String) {
     var straight by remember { mutableStateOf(prefs0.bool("scanStraight", false)) }
     var multi by remember { mutableStateOf(prefs0.bool("scanMulti", false)) }
     var count by remember { mutableIntStateOf(prefs0.int("scanCount", 0)) }
+    var check by remember { mutableStateOf(prefs0.bool("scanCheck", false)) }
     var skipBlank by remember { mutableStateOf(prefs0.bool("scanSkipBlank", false)) }
     var separate by remember { mutableStateOf(false) }
     var type by remember { mutableStateOf(runCatching { OutType.valueOf(prefs0.str("scanType", "PDF")) }.getOrDefault(OutType.PDF)) }
@@ -614,18 +615,9 @@ fun ScanScreen(m: Modifier, ip: String) {
             val d = (p.dpi * b.width / origW.coerceAtLeast(1)).coerceAtLeast(1)
             Triple(b, d, Images.documents(b, expected))
         }
-        // Nombre annoncé non atteint : aperçu, l'utilisateur continue ou annule.
-        if (expected > 1 && docs.size < expected) {
-            val (pv, ext) = withContext(Dispatchers.Default) {
-                val k = 1000f / maxOf(b.width, b.height)
-                val pv = if (k < 1f) Bitmap.createScaledBitmap(b, (b.width * k).toInt(), (b.height * k).toInt(), true) else b
-                pv to Images.docExtents(b, d.toFloat(), expected)
-            }
-            if (!splitAsk.missing(pv, SplitAsk.toPx(ext, d * pv.width.toFloat() / b.width), expected)) {
-                throw kotlinx.coroutines.CancellationException("repositionner")
-            }
-        }
-        return withContext(Dispatchers.Default) { (if (all || docs.size >= 2) docs else emptyList()).map { Page(Images.jpeg(it, 92), d) } }
+        // Numérisation multi-documents : cadres à ajuster si moins que prévu (ou toujours, si demandé).
+        val kept = if (all) splitAsk.review(b, d, expected, docs, check) ?: throw kotlinx.coroutines.CancellationException("repositionner") else docs
+        return withContext(Dispatchers.Default) { (if (all || kept.size >= 2) kept else emptyList()).map { Page(Images.jpeg(it, 92), d) } }
     }
 
     /** Écrit un groupe de pages dans le type choisi ; renvoie le texte OCR éventuel. */
@@ -706,7 +698,7 @@ fun ScanScreen(m: Modifier, ip: String) {
             Switcher("Détecter plusieurs documents", multi, "Photos, cartes, tickets espacés d'au moins 5 mm : un fichier chacun, redressé.") {
                 multi = it; prefs0.setBool("scanMulti", it)
             }
-            if (multi) DocCount(count) { count = it; prefs0.setInt("scanCount", it) }
+            if (multi) DocCount(count, check, { check = it; prefs0.setBool("scanCheck", it) }) { count = it; prefs0.setInt("scanCount", it) }
             Switcher("Ignorer les pages blanches", skipBlank, "Une page vide n'est pas ajoutée.") {
                 skipBlank = it; prefs0.setBool("scanSkipBlank", it)
             }

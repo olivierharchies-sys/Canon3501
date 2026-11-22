@@ -287,6 +287,7 @@ fun MaintenanceScreen(m: Modifier, prefs: PrinterPrefs, ip: String, go: (Screen)
                 Text("Imprimer un test des buses")
             }
         }
+        NozzleAuto(ip, busy == null, print = { runTool(Tool.NozzleCheck) }, clean = { confirm = it })
         Section("Mode d'envoi", Icons.Filled.Settings, sub = "Commandes Canon par le réseau (expérimental)") {
             var pwd by remember { mutableStateOf(prefs.ruiPassword) }
             OutlinedTextField(
