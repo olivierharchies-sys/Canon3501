@@ -164,6 +164,24 @@ object Images {
         return found.map { extract(src, it, d.second) }
     }
 
+    /**
+     * Emprise sur la vitre (mm depuis le coin repère) des documents détectés sur un scan de [dpi].
+     * Vide si la vitre est couverte ou s'il s'agit d'une page de texte (traitée comme A4).
+     */
+    fun docExtents(src: Bitmap, dpi: Float): List<RectF> {
+        val (px, d) = small(src, 600)
+        val w = d.first; val h = px.size / w
+        val found = Detect.findDocs(px, w, h)
+        if (found.size == 1 && (found[0].w * found[0].h > w * h * 0.92f || found[0].ink < 0.45f)) return emptyList()
+        val mm = d.second * 25.4f / dpi
+        return found.map { r ->
+            val a = Math.toRadians(r.angle.toDouble())
+            val c = kotlin.math.abs(kotlin.math.cos(a)).toFloat(); val s = kotlin.math.abs(kotlin.math.sin(a)).toFloat()
+            val hw = (r.w * c + r.h * s) / 2; val hh = (r.w * s + r.h * c) / 2
+            RectF((r.cx - hw) * mm, (r.cy - hh) * mm, (r.cx + hw) * mm, (r.cy + hh) * mm)
+        }
+    }
+
     /** Page blanche (rien d'imprimé). */
     fun isBlank(src: Bitmap): Boolean {
         val (px, d) = small(src, 400)

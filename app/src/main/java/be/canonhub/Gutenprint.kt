@@ -125,6 +125,14 @@ object Gutenprint {
     private fun kv(sel: Map<String, String>, borderless: Boolean, t: Tune = Tune()): Array<String> =
         (sel.filterValues { it.isNotEmpty() }.map { (k, v) -> "$k=$v" } + t.kv() + "b:FullBleed=${if (borderless) 1 else 0}").toTypedArray()
 
+    /** Marges non imprimables du pilote (mm) : gauche, haut, droite, bas. */
+    suspend fun margins(ctx: Context, sel: Map<String, String>): FloatArray = withContext(Dispatchers.IO) {
+        init(ctx)
+        val a = nArea(kv(sel, false))
+        val mm = 25.4f / 72f
+        floatArrayOf((a[2] * mm).toFloat(), (a[5] * mm).toFloat(), ((a[0] - a[3]) * mm).toFloat(), ((a[1] - a[4]) * mm).toFloat())
+    }
+
     /** Page d'essai : la mire d'étalonnage, imprimée par le pilote avec les réglages en cours. */
     suspend fun testPage(ctx: Context, ip: String, sel: Map<String, String>, dpi: Int, onStep: (String) -> Unit): String {
         val f = File(ctx.cacheDir, "gp-test.png")

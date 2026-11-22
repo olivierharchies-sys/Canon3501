@@ -128,13 +128,22 @@ fun CopyScreen(m: Modifier, prefs: PrinterPrefs, ip: String) {
     var cropIdx by remember { mutableStateOf<Int?>(null) }
     var queue by remember { mutableStateOf<List<CopyItem>>(emptyList()) }
     var sel by remember { mutableIntStateOf(0) }
+    var auto by remember { mutableStateOf(prefs.bool("copyAuto", false)) }
+    var keep by remember { mutableStateOf(prefs.bool("copyKeep", true)) }
     val drv = rememberDriver(prefs, route == Route.Driver)
     val gpDpi = when (quality) { Quality.Draft -> 150; Quality.Standard -> 200; Quality.High -> 300 }
 
-    /** Une feuille : pilote intégré, IPP direct ou fenêtre Android. */
-    suspend fun printSheet(bmp: Bitmap): String = when (route) {
+    /**
+     * Marges à compenser pour garder la taille d'origine hors pilote intégré (le service d'impression
+     * réduit la feuille à sa zone imprimable). Null si inutile ou déjà corrigé par l'étalonnage.
+     */
+    suspend fun margins(): FloatArray? = if (!keep || route == Route.Driver || Calib.state.printOn) null
+    else runCatching { Gutenprint.margins(ctx, drv.sel) }.getOrElse { floatArrayOf(3.4f, 3f, 3.4f, 5f) }
+
+    /** Une feuille déjà mise en page : pilote intégré, IPP direct ou fenêtre Android. */
+    suspend fun printSheetRaw(bmp: Bitmap): String = when (route) {
         Route.Driver -> try {
-            driverSheet(ctx, ip, drv, bmp, color, copies, gpDpi) { msg = it }
+            driverSheet(ctx, ip, drv, bmp, color, copies, gpDpi, truePage = keep) { msg = it }
         } catch (e: Exception) {
             printBitmap(ctx, "copie", bmp)
             "Pilote intégré : échec (${e.message}). Fenêtre Android ouverte."
@@ -155,14 +164,16 @@ fun CopyScreen(m: Modifier, prefs: PrinterPrefs, ip: String) {
     }
 
     /** Met en page et imprime une liste de documents. */
-    suspend fun printAll(items: List<CopyItem>): String {
+    suspend fun printAll(items: List<CopyItem>, lay: PageLayout = layout): String {
         val f = File(ctx.cacheDir, "copie.pdf")
         var first: Bitmap? = null
         val fix = route != Route.Driver
+        val mg = margins()
         val n = withContext(Dispatchers.Default) {
             val doc = android.graphics.pdf.PdfDocument()
             var k = 0
-            CopyLayout.render(items, layout, out.target(), filt, straight, corr) { b ->
+            CopyLayout.render(items, lay, out.target(), filt, straight, corr, keep) { b0 ->
+                val b = mg?.let { CopyLayout.compensate(b0, it) } ?: b0
                 k++
                 if (k == 1) first = b
                 CopyLayout.addPdfPage(doc, b, k, fix)
@@ -176,11 +187,11 @@ fun CopyScreen(m: Modifier, prefs: PrinterPrefs, ip: String) {
         PrinterPrefs(ctx).bump("copies", items.size)
         val docs = items.size
         if (n == 1) {
-            val r = printSheet(first!!)
+            val r = printSheetRaw(first!!)
             return if (docs > 1) "$docs documents sur 1 feuille. $r" else r
         }
         val r = if (route == Route.Driver) try {
-            driverFile(ctx, ip, drv, Uri.fromFile(f), "application/pdf", color, copies, gpDpi) { msg = it }
+            driverFile(ctx, ip, drv, Uri.fromFile(f), "application/pdf", color, copies, gpDpi, truePage = keep) { msg = it }
         } catch (e: Exception) {
             androidPrint(ctx, Uri.fromFile(f), "application/pdf")
             "Pilote intégré : échec (${e.message}). Fenêtre Android ouverte."
@@ -191,22 +202,56 @@ fun CopyScreen(m: Modifier, prefs: PrinterPrefs, ip: String) {
         return "$docs document(s) sur $n feuilles. $r"
     }
 
-    suspend fun add(item: CopyItem): String = when {
+    suspend fun add(items: List<CopyItem>, lay: PageLayout = layout): String = when {
         batch -> {
-            queue = queue + item; sel = queue.size - 1
+            queue = queue + items; sel = queue.size - 1
             "Ajouté au lot (${queue.size}). Posez le document suivant."
         }
         preview -> {
-            queue = listOf(item); sel = 0
+            queue = items; sel = 0
             "Aperçu prêt : choisissez la zone si besoin, puis « Imprimer »."
         }
-        else -> printAll(listOf(item))
+        else -> printAll(items, lay)
+    }
+
+    suspend fun add(item: CopyItem): String = add(listOf(item))
+
+    /**
+     * Détection automatique : prénumérisation rapide (75 dpi), choix de la plus petite zone
+     * qui contient les documents, numérisation, puis un document par image détectée.
+     */
+    suspend fun autoCopy(): String {
+        msg = "Prénumérisation…"
+        val pre = ScanService.keep(ctx) { Escl.scan(ip, 75, true, Area.A4) }
+        val ext = withContext(Dispatchers.Default) {
+            Images.decode(pre, 1000)?.let { b -> Images.docExtents(b, 75f * b.width / (Area.A4.w * 75 / 300).coerceAtLeast(1)) }
+        } ?: throw IOException("prénumérisation illisible")
+        if (ext.isEmpty()) {
+            msg = "Page entière détectée. Numérisation…"
+            return add(CopyItem(Page(ScanService.keep(ctx) { Escl.scan(ip, dpi, color, Area.A4) }, dpi)))
+        }
+        // Plus petite zone (depuis le coin repère) qui contient tout, avec 3 mm de marge.
+        val r = ext.maxOf { it.right } + 3f; val btm = ext.maxOf { it.bottom } + 3f
+        val zone = listOf(Area.Card, Area.Photo, Area.A5, Area.A4)
+            .firstOrNull { it.w / 300f * 25.4f >= r && it.h / 300f * 25.4f >= btm } ?: Area.A4
+        msg = "${ext.size} document(s) détecté(s), zone ${zone.label}. Numérisation…"
+        val b = ScanService.keep(ctx) { Escl.scan(ip, dpi, color, zone) }
+        val docs = withContext(Dispatchers.Default) {
+            val img = Images.decode(b, 4000) ?: throw IOException("image illisible")
+            val d = (dpi * img.width / (zone.w * dpi / 300).coerceAtLeast(1)).coerceAtLeast(1)
+            Images.documents(img).map { Page(Images.jpeg(it, 92), d) }
+        }
+        if (docs.isEmpty()) return add(CopyItem(Page(b, dpi)))
+        msg = "Mise en page…"
+        // Plusieurs documents : regroupés à taille réelle ; un seul : une feuille.
+        return add(docs.map { CopyItem(it) }, if (docs.size > 1) PageLayout.Pack else PageLayout.One)
     }
 
     fun scanNow() {
         scope.launch {
             busy = true; msg = "Numérisation en cours…"
             msg = try {
+                if (auto && area != Area.Card) { msg = autoCopy(); busy = false; return@launch }
                 val b = ScanService.keep(ctx) { Escl.scan(ip, dpi, color, area) }
                 val f = front
                 if (area != Area.Card) {
@@ -263,7 +308,11 @@ fun CopyScreen(m: Modifier, prefs: PrinterPrefs, ip: String) {
         )
 
         Section("Que copiez-vous ?", Icons.Filled.Layers, accent = Brand.Copy[1]) {
+            Switcher("Détection automatique", auto, "Prénumérisation rapide : taille et nombre de documents détectés, une image par document.") {
+                auto = it; prefs.setBool("copyAuto", it)
+            }
             ChoiceGrid(Area.entries, area, 2, ::areaLabel, ::areaSub, ::areaIcon, accent = Brand.Copy[1]) { area = it; front = null }
+            if (auto && area != Area.Card) Hint("Format choisi automatiquement (sauf carte recto/verso).")
             if (area == Area.Card) CardSteps(front != null)
             else if (area != Area.A4) Hint("Placez le document contre le coin repère de la vitre.")
         }
@@ -316,6 +365,11 @@ fun CopyScreen(m: Modifier, prefs: PrinterPrefs, ip: String) {
         }
 
         if (area != Area.Card) Fold("Mise en page et format", Icons.Filled.ViewQuilt, sub = layout.label, accent = Brand.Copy[1]) {
+            Switcher(
+                "Taille d'origine (100 %)", keep,
+                if (keep) "Aucune réduction. Les bords à moins de 3 à 5 mm du papier ne s'impriment pas."
+                else "Ajustée à la zone imprimable : réduite d'environ 3 %, rien n'est coupé.",
+            ) { keep = it; prefs.setBool("copyKeep", it) }
             Chips(PageLayout.entries, layout, { it.label }) { layout = it; prefs.copyLayout = it }
             Hint(
                 when (layout) {

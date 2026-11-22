@@ -151,12 +151,13 @@ fun DriverPicker(d: DriverState, param: String, title: String, icon: ImageVector
 /** Imprime un fichier de feuilles A4 (copie, planche) en taille réelle par le pilote intégré. */
 suspend fun driverFile(
     ctx: Context, ip: String, d: DriverState, uri: Uri, mime: String, color: Boolean, copies: Int, dpi: Int,
+    truePage: Boolean = true,
     onStep: (String) -> Unit,
 ): String {
     if (ip.isBlank()) throw IOException("adresse IP manquante")
     val r = Gutenprint.print(
         ctx, ip, uri, mime, d.selFor(color), borderless = false, fill = false, dpi = dpi,
-        truePage = true, job = Gutenprint.Job(copies = copies, orient = Orient.Portrait), onStep = onStep,
+        truePage = truePage, job = Gutenprint.Job(copies = copies, orient = Orient.Portrait), onStep = onStep,
     )
     markPrint(ctx)
     return r
@@ -165,11 +166,12 @@ suspend fun driverFile(
 /** Une feuille A4 (image) imprimée par le pilote intégré. */
 suspend fun driverSheet(
     ctx: Context, ip: String, d: DriverState, bmp: Bitmap, color: Boolean, copies: Int, dpi: Int,
+    truePage: Boolean = true,
     onStep: (String) -> Unit,
 ): String {
     val f = File(ctx.cacheDir, "sheet-${System.currentTimeMillis()}.png")
     withContext(Dispatchers.IO) { f.outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) } }
-    return try { driverFile(ctx, ip, d, Uri.fromFile(f), "image/png", color, copies, dpi, onStep) } finally { f.delete() }
+    return try { driverFile(ctx, ip, d, Uri.fromFile(f), "image/png", color, copies, dpi, truePage, onStep) } finally { f.delete() }
 }
 
 // ---------- Document choisi ----------

@@ -47,7 +47,10 @@ object CopyLayout {
      * Compose les feuilles A4 (300 dpi) et les passe une à une à [sink].
      * [target] : format imposé (cm) ou null.
      */
-    fun render(items: List<CopyItem>, layout: PageLayout, target: Pair<Float, Float>?, filt: Filter, straight: Boolean = false, fix: Fix = Fix(), sink: (Bitmap) -> Unit) {
+    fun render(
+        items: List<CopyItem>, layout: PageLayout, target: Pair<Float, Float>?, filt: Filter, straight: Boolean = false, fix: Fix = Fix(),
+        keep: Boolean = false, sink: (Bitmap) -> Unit,
+    ) {
         fun st(b: Bitmap) = if (straight) Images.straighten(b) else b
         val sheets = items.filter { it.sheet }
         val docs = items.filterNot { it.sheet }
@@ -63,8 +66,10 @@ object CopyLayout {
             layout == PageLayout.One -> docs.forEach { d ->
                 load(d)?.let { (b, dpi) ->
                     val x = st(b)
-                    // Zone choisie : posée à taille réelle sur une feuille A4.
-                    sink(prep(if (d.page.crop != null) Formats.onA4(x, x.width / dpi * 2.54f to x.height / dpi * 2.54f) else x, filt, fix))
+                    // Zone choisie, ou document plus petit qu'A4 en taille d'origine : posé à taille réelle.
+                    val cm = x.width / dpi * 2.54f to x.height / dpi * 2.54f
+                    val full = cm.first > 20f && cm.second > 28.7f
+                    sink(prep(if (d.page.crop != null || (keep && !full)) Formats.onA4(x, cm) else x, filt, fix))
                 }
             }
             layout == PageLayout.Two -> docs.chunked(2).forEach { pair ->
@@ -123,6 +128,21 @@ object CopyLayout {
             shelf = maxOf(shelf, b.height.toFloat())
         }
         out?.let(sink)
+    }
+
+    /**
+     * Compense la réduction « ajuster à la zone imprimable » d'un service d'impression :
+     * feuille agrandie autour du centre selon les marges (mm : gauche, haut, droite, bas).
+     */
+    fun compensate(b: Bitmap, m: FloatArray): Bitmap {
+        val s = minOf((210f - m[0] - m[2]) / 210f, (297f - m[1] - m[3]) / 297f)
+        if (s >= 0.999f || s < 0.8f) return b
+        val w = b.width * s; val h = b.height * s
+        val l = (b.width - w) / 2; val t = (b.height - h) / 2
+        val out = Bitmap.createBitmap(b.width, b.height, Bitmap.Config.ARGB_8888)
+        Canvas(out).drawBitmap(b, android.graphics.Rect(l.toInt(), t.toInt(), (l + w).toInt(), (t + h).toInt()),
+            RectF(0f, 0f, b.width.toFloat(), b.height.toFloat()), Paint(Paint.FILTER_BITMAP_FLAG))
+        return out
     }
 
     /** Écrit une feuille A4 dans un PDF (corrigée de l'échelle d'impression). */

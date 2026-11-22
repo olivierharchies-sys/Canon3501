@@ -54,6 +54,9 @@ private enum class W(val title: String, val optional: Boolean, val help: String)
     Nozzle("Test des buses", true,
         "L'assistant imprime le motif de test. Regardez-le : lignes continues et grilles complètes dans toutes les couleurs ? " +
             "Sinon, lancez un nettoyage puis refaites le test. Une buse bouchée fausse tout l'étalonnage."),
+    Align("Alignement des têtes", true,
+        "Contre les lignes horizontales (bandes) dans le sens d'avancement du papier. L'assistant imprime la feuille d'alignement. " +
+            "Posez-la face imprimée vers le bas, coin repéré en haut à gauche, puis lancez la lecture : l'imprimante se règle seule."),
     Ref("Référence du scanner", true,
         "Avec une échelle de gris du commerce, le scanner est corrigé seul. Le réglage du pilote ne dépend alors plus du scanner. " +
             "Sans échelle, passez : la correction reste bonne pour la copie, approchée pour l'impression de fichiers."),
@@ -117,6 +120,7 @@ fun CalibWizard(ip: String, prefs: PrinterPrefs, onClose: () -> Unit) {
                 "File vidée.\n$q\nÉtat : $st"
             })
             W.Nozzle -> run({ "Motif envoyé (${CanonTools.run(ip, Tool.NozzleCheck, Transport.Bjnp, prefs.ruiPassword)})." })
+            W.Align -> run({ "Feuille d'alignement envoyée (${CanonTools.run(ip, Tool.Alignment, Transport.Auto, prefs.ruiPassword)})." })
             W.Tune1, W.Tune2, W.Copy -> printChart()
             else -> Unit
         }
@@ -154,6 +158,22 @@ fun CalibWizard(ip: String, prefs: PrinterPrefs, onClose: () -> Unit) {
                             })
                         }, Modifier.fillMaxWidth()) { Text("Non : nettoyer puis refaire le test") }
                     } else if (ph == Ph.Idle) OutlinedButton(onClick = { go(W.Nozzle) }, Modifier.fillMaxWidth()) { Text("Réessayer") }
+
+                    W.Align -> if (ph == Ph.Ask) {
+                        Text("Feuille sortie ? Posez-la face imprimée vers le bas, coin repéré en haut à gauche.", fontWeight = FontWeight.Bold)
+                        Button(onClick = {
+                            run({
+                                val via = CanonTools.run(ip, Tool.AlignScan, Transport.Auto, prefs.ruiPassword)
+                                ToolLog(ctx).mark(Tool.AlignScan); log += "Alignement des têtes lancé."
+                                "Lecture lancée ($via). Attendez la fin sur l'imprimante, puis continuez."
+                            }, Ph.Place)
+                        }, Modifier.fillMaxWidth()) { Text("Lire la feuille d'alignement") }
+                    } else if (ph == Ph.Place) {
+                        Button(onClick = { next() }, Modifier.fillMaxWidth()) { Text("Alignement terminé, continuer") }
+                    } else if (ph == Ph.Idle) {
+                        Hint("La lecture passe par la page web de l'imprimante : mot de passe dans Entretien si demandé.")
+                        OutlinedButton(onClick = { go(W.Align) }, Modifier.fillMaxWidth()) { Text("Réessayer") }
+                    }
 
                     W.Ref -> ScanRefSection(ip) { log += it; next() }
 
