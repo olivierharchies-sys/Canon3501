@@ -12,8 +12,8 @@ android {
         applicationId = "be.canonhub"
         minSdk = 29
         targetSdk = 35
-        versionCode = 52
-        versionName = "2.3.3"
+        versionCode = 53
+        versionName = "2.4.0"
         ndk { abiFilters += "arm64-v8a" }
     }
 
@@ -49,6 +49,10 @@ android {
     buildFeatures {
         compose = true
     }
+    // OpenCV et Gutenprint peuvent embarquer chacun la bibliothèque C++ partagée.
+    packaging {
+        jniLibs { pickFirsts += "**/libc++_shared.so" }
+    }
 }
 
 dependencies {
@@ -63,4 +67,6 @@ dependencies {
     implementation("androidx.work:work-runtime-ktx:2.9.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("com.google.mlkit:text-recognition:16.0.1")
+    // Détection des documents sur la vitre (natif, arm64 seulement via abiFilters).
+    implementation("org.opencv:opencv:4.10.0")
 }

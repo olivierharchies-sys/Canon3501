@@ -148,7 +148,7 @@ object Detect {
     }
 
     /** Ramène l'angle dans (-45, 45] en échangeant largeur et hauteur si besoin. */
-    private fun norm(cx: Float, cy: Float, w: Float, h: Float, deg: Float): RotRect {
+    internal fun norm(cx: Float, cy: Float, w: Float, h: Float, deg: Float): RotRect {
         var a = deg; var ww = w; var hh = h
         while (a > 45f) { a -= 90f; val t = ww; ww = hh; hh = t }
         while (a <= -45f) { a += 90f; val t = ww; ww = hh; hh = t }

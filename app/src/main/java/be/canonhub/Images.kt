@@ -160,7 +160,7 @@ object Images {
     fun documents(src: Bitmap): List<Bitmap> {
         val (px, d) = small(src, 600)
         val w = d.first; val h = px.size / w
-        val found = Detect.findDocs(px, w, h)
+        val found = Cv.findDocs(px, w, h)?.takeIf { it.isNotEmpty() } ?: Detect.findDocs(px, w, h)
         // Un seul objet couvrant la vitre, ou une seule page de texte : rien à découper (marges gardées).
         if (found.size == 1 && (found[0].w * found[0].h > w * h * 0.92f || found[0].ink < 0.45f)) return emptyList()
         return found.map { extract(src, it, d.second) }
@@ -173,7 +173,7 @@ object Images {
     fun docExtents(src: Bitmap, dpi: Float): List<RectF> {
         val (px, d) = small(src, 600)
         val w = d.first; val h = px.size / w
-        val found = Detect.findDocs(px, w, h)
+        val found = Cv.findDocs(px, w, h)?.takeIf { it.isNotEmpty() } ?: Detect.findDocs(px, w, h)
         if (found.size == 1 && (found[0].w * found[0].h > w * h * 0.92f || found[0].ink < 0.45f)) return emptyList()
         val mm = d.second * 25.4f / dpi
         return found.map { r ->
